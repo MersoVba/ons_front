@@ -2,6 +2,7 @@ import serverless from "serverless-http";
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
 
 // Import route handlers
 import { handleDemo } from "./routes/demo.js";
@@ -75,13 +76,21 @@ app.get("/robots.txt", (_req, res) => {
 
 // Serve static assets with explicit MIME types (CRITICAL for ES modules)
 // This route MUST come before express.static to ensure correct MIME types
+// Using fs.readFile to ensure we have full control over headers
 app.get("/assets/:path*", (req, res) => {
   // Express uses 'path*' as the parameter name for :path* routes
   const pathParam = (req.params as any)['path*'] || '';
   const assetPath = `/assets/${pathParam}`;
   const ext = path.extname(assetPath).toLowerCase();
+  const fullPath = path.join(distPath, assetPath);
   
-  // Set Content-Type header BEFORE sending file
+  // Check if file exists
+  if (!fs.existsSync(fullPath)) {
+    console.error(`❌ File not found: ${fullPath}`);
+    return res.status(404).json({ error: "File not found" });
+  }
+  
+  // Set Content-Type header BEFORE reading/sending file
   if (mimeTypes[ext]) {
     res.setHeader('Content-Type', mimeTypes[ext]);
   } else {
@@ -94,17 +103,17 @@ app.get("/assets/:path*", (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   }
   
-  const fullPath = path.join(distPath, assetPath);
-  res.sendFile(fullPath, (err) => {
-    if (err) {
-      console.error(`❌ Error serving static file: ${assetPath}`, err);
-      if (!res.headersSent) {
-        res.status(404).json({ error: "File not found" });
-      }
-    } else {
-      console.log(`✅ Served static file: ${assetPath} with MIME type: ${mimeTypes[ext] || 'unknown'}`);
+  // Read and send file explicitly
+  try {
+    const fileContent = fs.readFileSync(fullPath);
+    console.log(`✅ Served static file: ${assetPath} with MIME type: ${mimeTypes[ext] || 'application/octet-stream'}`);
+    res.send(fileContent);
+  } catch (err) {
+    console.error(`❌ Error reading file: ${assetPath}`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Error reading file" });
     }
-  });
+  }
 });
 
 // Serve static files (fallback for other files)
