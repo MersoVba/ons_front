@@ -2,7 +2,6 @@ import serverless from "serverless-http";
 import express from "express";
 import cors from "cors";
 import path from "path";
-import { fileURLToPath } from "url";
 
 // Import route handlers
 import { handleDemo } from "./routes/demo.js";
@@ -37,12 +36,26 @@ app.post("/api/v1/login/validar-totp", handleValidateTotp);
 app.post("/api/pagamento-boleto/upload", uploadMiddleware, handleUploadComprovante);
 app.post("/api/pagamento-boleto/fake", handleFakeEnvio);
 
+// Handle common static file requests early (BEFORE express.static)
+app.get("/favicon.ico", (_req, res) => {
+  res.status(204).end(); // No content - browser will use default
+});
+
+app.get("/robots.txt", (_req, res) => {
+  res.type("text/plain");
+  res.send("User-agent: *\nDisallow:");
+});
+
 // Serve static files from dist/spa
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const distPath = path.join(process.cwd(), "dist/spa");
 
-app.use(express.static(distPath));
+// Serve static files (JS, CSS, images, etc.)
+app.use(express.static(distPath, {
+  maxAge: "1y",
+  etag: true,
+  lastModified: true,
+  index: false // Don't serve index.html automatically
+}));
 
 // SPA fallback - serve index.html for all non-API routes
 app.get("*", (req, res) => {
@@ -51,9 +64,20 @@ app.get("*", (req, res) => {
     return res.status(404).json({ error: "API endpoint not found" });
   }
 
+  // Skip static file extensions
+  const staticExtensions = [".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".json", ".xml", ".txt"];
+  if (staticExtensions.some(ext => req.path.toLowerCase().endsWith(ext))) {
+    return res.status(404).json({ error: "Static file not found" });
+  }
+
   // Serve index.html for SPA routing
   const indexPath = path.join(distPath, "index.html");
-  res.sendFile(indexPath);
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      console.error("Error serving index.html:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
 });
 
 // Export serverless handler
