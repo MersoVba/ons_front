@@ -85,6 +85,7 @@ app.use(express.static(distPath, {
 
 // SPA fallback - serve index.html for all non-API routes
 // This catches routes like /login, /, /dashboard, etc.
+// IMPORTANT: This should only catch routes that are NOT static files
 app.get("*", (req, res) => {
   // Skip API routes
   if (req.path.startsWith("/api/")) {
@@ -92,22 +93,34 @@ app.get("*", (req, res) => {
   }
 
   // Skip static file extensions (these should be handled by express.static above)
-  const staticExtensions = [".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".json", ".xml", ".txt", ".webp", ".avif"];
+  // This prevents unnecessary processing of static files
+  const staticExtensions = [".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".json", ".xml", ".txt", ".webp", ".avif", ".map"];
   if (staticExtensions.some(ext => req.path.toLowerCase().endsWith(ext))) {
     return res.status(404).json({ error: "Static file not found" });
   }
 
+  // Skip assets directory (should be handled by express.static)
+  if (req.path.startsWith("/assets/")) {
+    return res.status(404).json({ error: "Asset not found" });
+  }
+
   // Serve index.html for SPA routing (React Router will handle client-side routing)
   const indexPath = path.join(distPath, "index.html");
+  
+  // Set proper headers for HTML
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  
   res.sendFile(indexPath, (err) => {
     if (err) {
       console.error("❌ Error serving index.html:", err);
       console.error("   Path requested:", req.path);
       console.error("   Dist path:", distPath);
-      res.status(500).json({ 
-        error: "Internal server error",
-        message: err.message 
-      });
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          error: "Internal server error",
+          message: err.message 
+        });
+      }
     } else {
       console.log("✅ Served index.html for:", req.path);
     }
