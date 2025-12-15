@@ -36,7 +36,34 @@ app.post("/api/v1/login/validar-totp", handleValidateTotp);
 app.post("/api/pagamento-boleto/upload", uploadMiddleware, handleUploadComprovante);
 app.post("/api/pagamento-boleto/fake", handleFakeEnvio);
 
-// Handle common static file requests early (BEFORE express.static)
+// Serve static files from dist/spa
+// In Vercel, process.cwd() points to /var/task
+const distPath = path.join(process.cwd(), "dist/spa");
+console.log("📁 Dist path:", distPath);
+console.log("📁 Process cwd:", process.cwd());
+
+// MIME types mapping
+const mimeTypes: Record<string, string> = {
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.ico': 'image/x-icon',
+};
+
+// Handle common static file requests early
 app.get("/favicon.ico", (_req, res) => {
   res.status(204).end(); // No content - browser will use default
 });
@@ -46,82 +73,49 @@ app.get("/robots.txt", (_req, res) => {
   res.send("User-agent: *\nDisallow:");
 });
 
-// Serve static files from dist/spa
-// In Vercel, process.cwd() points to /var/task
-const distPath = path.join(process.cwd(), "dist/spa");
-console.log("📁 Dist path:", distPath);
-console.log("📁 Process cwd:", process.cwd());
-
-// Middleware para garantir MIME types corretos ANTES de servir arquivos estáticos
-app.use((req, res, next) => {
-  // Apenas para arquivos estáticos (assets, etc)
-  if (req.path.startsWith('/assets/') || req.path.match(/\.(js|mjs|css|woff|woff2|ttf|eot|png|jpg|jpeg|gif|svg|webp|ico|map)$/i)) {
-    const ext = path.extname(req.path).toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      '.js': 'application/javascript; charset=utf-8',
-      '.mjs': 'application/javascript; charset=utf-8',
-      '.css': 'text/css; charset=utf-8',
-      '.html': 'text/html; charset=utf-8',
-      '.json': 'application/json; charset=utf-8',
-      '.map': 'application/json; charset=utf-8',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.svg': 'image/svg+xml',
-      '.webp': 'image/webp',
-      '.woff': 'font/woff',
-      '.woff2': 'font/woff2',
-      '.ttf': 'font/ttf',
-      '.eot': 'application/vnd.ms-fontobject',
-      '.ico': 'image/x-icon',
-    };
-    
-    if (mimeTypes[ext]) {
-      res.setHeader('Content-Type', mimeTypes[ext]);
-    }
+// Serve static assets with explicit MIME types (CRITICAL for ES modules)
+// This route MUST come before express.static to ensure correct MIME types
+app.get("/assets/:path*", (req, res) => {
+  const assetPath = `/assets/${req.params.path || ''}`;
+  const ext = path.extname(assetPath).toLowerCase();
+  
+  // Set Content-Type header BEFORE sending file
+  if (mimeTypes[ext]) {
+    res.setHeader('Content-Type', mimeTypes[ext]);
+  } else {
+    // Default to application/octet-stream if unknown
+    res.setHeader('Content-Type', 'application/octet-stream');
   }
-  next();
+  
+  // Cache control for static assets
+  if (ext === '.js' || ext === '.css' || ext === '.woff' || ext === '.woff2') {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+  
+  const fullPath = path.join(distPath, assetPath);
+  res.sendFile(fullPath, (err) => {
+    if (err) {
+      console.error(`❌ Error serving static file: ${assetPath}`, err);
+      if (!res.headersSent) {
+        res.status(404).json({ error: "File not found" });
+      }
+    } else {
+      console.log(`✅ Served static file: ${assetPath} with MIME type: ${mimeTypes[ext] || 'unknown'}`);
+    }
+  });
 });
 
-// Serve static files (JS, CSS, images, etc.) - MUST be before catch-all
-// Configure MIME types explicitly for all static files
+// Serve static files (fallback for other files)
 app.use(express.static(distPath, {
   maxAge: "1y",
   etag: true,
   lastModified: true,
   index: false,
   setHeaders: (res, filePath, stat) => {
-    // Get file extension
     const ext = path.extname(filePath).toLowerCase();
-    
-    // Set MIME types based on file extension
-    const mimeTypes: Record<string, string> = {
-      '.js': 'application/javascript; charset=utf-8',
-      '.mjs': 'application/javascript; charset=utf-8',
-      '.css': 'text/css; charset=utf-8',
-      '.html': 'text/html; charset=utf-8',
-      '.json': 'application/json; charset=utf-8',
-      '.map': 'application/json; charset=utf-8',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.svg': 'image/svg+xml',
-      '.webp': 'image/webp',
-      '.woff': 'font/woff',
-      '.woff2': 'font/woff2',
-      '.ttf': 'font/ttf',
-      '.eot': 'application/vnd.ms-fontobject',
-      '.ico': 'image/x-icon',
-    };
-    
-    // Set Content-Type if we have a mapping for this extension
     if (mimeTypes[ext]) {
       res.setHeader('Content-Type', mimeTypes[ext]);
     }
-    
-    // Cache control for static assets
     if (ext === '.js' || ext === '.css' || ext === '.woff' || ext === '.woff2') {
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
