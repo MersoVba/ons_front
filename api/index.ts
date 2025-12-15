@@ -1,8 +1,8 @@
 import serverless from "serverless-http";
 import path from "path";
-import { createServer } from "../server/index";
+import { createServer } from "../dist/server/node-build.mjs";
 
-// Create Express app using createServer from server/index
+// Create Express app using createServer from compiled server build
 const app = createServer();
 
 // In production, serve the built SPA files

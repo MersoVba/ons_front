@@ -2,6 +2,9 @@ import path from "path";
 import { createServer } from "./index";
 import * as express from "express";
 
+// Export createServer for Vercel serverless function
+export { createServer };
+
 const app = createServer();
 const port = process.env.PORT || 3000;
 

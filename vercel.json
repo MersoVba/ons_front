@@ -1,11 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm run build:client",
+  "buildCommand": "npm run build",
   "outputDirectory": ".",
   "functions": {
     "api/index.ts": {
       "runtime": "@vercel/node",
-      "includeFiles": "server/**",
+      "includeFiles": "dist/server/**",
       "maxDuration": 60
     }
   },
