@@ -1,5 +1,5 @@
 import { RequestHandler } from "express";
-import { PagamentoBoleto } from "../../shared/api";
+import { PagamentoBoleto } from "../../shared/api.js";
 
 /**
  * Endpoint fake para receber dados de pagamento de boleto

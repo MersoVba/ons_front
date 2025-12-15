@@ -1,8 +1,8 @@
 import { RequestHandler } from "express";
 import multer from "multer";
 import { createRequire } from "module";
-import { ProcessarComprovanteResponse, TipoDocumento } from "../../shared/api";
-import { processarTextoPDF } from "../utils/pdf-parsers";
+import { ProcessarComprovanteResponse, TipoDocumento } from "../../shared/api.js";
+import { processarTextoPDF } from "../utils/pdf-parsers.js";
 
 // pdf-parse 1.1.1 é CommonJS, usar createRequire para importar
 const require = createRequire(import.meta.url);

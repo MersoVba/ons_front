@@ -1,4 +1,4 @@
-import { PagamentoBoleto, TipoDocumento } from "../../shared/api";
+import { PagamentoBoleto, TipoDocumento } from "../../shared/api.js";
 
 export type BancoDetectado = "ITAU" | "BRADESCO" | "SANTANDER" | "BANCO_DO_BRASIL" | "DESCONHECIDO";
 

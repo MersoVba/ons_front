@@ -1,5 +1,5 @@
 import { RequestHandler } from "express";
-import { LoginRequest, AuthenticationResponse } from "@shared/api";
+import { LoginRequest, AuthenticationResponse } from "../../shared/api.js";
 
 /**
  * Endpoint mock de login - aceita login sem validação de senha

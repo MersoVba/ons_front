@@ -4,10 +4,11 @@ import express from "express";
 import cors from "cors";
 
 // Import routes directly to ensure they're bundled
-import { handleDemo } from "../server/routes/demo";
-import { handleUploadComprovante, uploadMiddleware } from "../server/routes/pagamento-boleto";
-import { handleFakeEnvio } from "../server/routes/pagamento-boleto-fake";
-import { handleLogin, handleValidateTotp } from "../server/routes/login";
+// Note: Using .js extensions for ESM compatibility in Vercel
+import { handleDemo } from "../server/routes/demo.js";
+import { handleUploadComprovante, uploadMiddleware } from "../server/routes/pagamento-boleto.js";
+import { handleFakeEnvio } from "../server/routes/pagamento-boleto-fake.js";
+import { handleLogin, handleValidateTotp } from "../server/routes/login.js";
 
 // Create Express app
 const app = express();
