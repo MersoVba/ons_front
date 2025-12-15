@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { InputOTP } from "@/components/ui/input-otp";
 import { useToast } from "@/hooks/use-toast";
 import { AuthAPI } from "@/lib/auth-api";
+import { Eye, EyeOff } from "lucide-react";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -15,42 +16,7 @@ export default function Login() {
   const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
   const [isMfaRequired, setIsMfaRequired] = useState(false);
-
-  // Registration state
-  const [showRegister, setShowRegister] = useState(false);
-  const [companyName, setCompanyName] = useState("");
-  const [cnpj, setCnpj] = useState("");
-  const [tradeName, setTradeName] = useState("");
-  const [contactName, setContactName] = useState("");
-  const [regEmail, setRegEmail] = useState("");
-  const [regPhone, setRegPhone] = useState("");
-  const [address, setAddress] = useState("");
-  const [number, setNumber] = useState("");
-  const [bairro, setBairro] = useState("");
-  const [city, setCity] = useState("");
-  const [stateUf, setStateUf] = useState("");
-  const [zip, setZip] = useState("");
-  const [accessType, setAccessType] = useState<'AVD'|'AVC'|''>('');
-
-  const fetchAddressByCep = async (cepRaw: string) => {
-    const cep = cepRaw.replace(/\D/g, '');
-    if (cep.length !== 8) return;
-    try {
-      const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-      if (!res.ok) throw new Error('CEP lookup failed');
-      const data = await res.json();
-      if (data.erro) {
-        toast({ title: 'CEP não encontrado', description: 'Verifique o CEP informado', action: undefined });
-        return;
-      }
-      setAddress(data.logradouro || '');
-      setBairro(data.bairro || '');
-      setCity(data.localidade || '');
-      setStateUf(data.uf || '');
-    } catch (e) {
-      // ignore
-    }
-  };
+  const [showPassword, setShowPassword] = useState(false);
 
   const submitCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,22 +25,38 @@ export default function Login() {
       return;
     }
 
+    if (!password) {
+      toast({ title: "Preencha a senha", description: "Senha é obrigatória", action: undefined });
+      return;
+    }
+
     setLoading(true);
     try {
-      // Login sem validação de senha - apenas com email
-      const response = await AuthAPI.login({ username: email, password: "" });
+      const response = await AuthAPI.login({ username: email, password: password });
       
-      // Se MFA está habilitado, precisa validar TOTP
-      if (response.mfaRequired) {
-        setIsMfaRequired(true);
-        setStep("mfa");
+      // Se é primeiro acesso, o backend retorna um token temporário
+      if (response.firstAccess && response.token) {
+        const resolvedAccess = determineAccess(email);
+        AuthAPI.saveToken(response.token, email, resolvedAccess);
         toast({ 
-          title: "Autenticação em duas etapas", 
-          description: "Insira o código do Google Authenticator", 
+          title: "Primeiro acesso", 
+          description: "Você será redirecionado para definir sua senha", 
           action: undefined 
         });
-      } else if (response.token) {
-        // Login direto sem MFA (código por email ainda não implementado no backend)
+        navigate("/");
+      } 
+      // Se não tem token e não é primeiro acesso, precisa validar código 2FA
+      else if (response.mfaRequired || (!response.token && !response.firstAccess)) {
+        setIsMfaRequired(false); // Código enviado por email, não TOTP
+        setStep("mfa");
+        toast({ 
+          title: "Código enviado", 
+          description: "Enviamos um código de 6 dígitos para seu e-mail", 
+          action: undefined 
+        });
+      } 
+      // Login direto com token
+      else if (response.token) {
         const resolvedAccess = determineAccess(email);
         AuthAPI.saveToken(response.token, email, resolvedAccess);
         toast({ 
@@ -83,15 +65,6 @@ export default function Login() {
           action: undefined 
         });
         navigate("/");
-      } else {
-        // Fluxo antigo: código por email (fallback)
-        setStep("mfa");
-        setIsMfaRequired(false);
-        toast({ 
-          title: "Código enviado", 
-          description: "Enviamos um código para seu e-mail", 
-          action: undefined 
-        });
       }
     } catch (error: any) {
       toast({ 
@@ -113,46 +86,27 @@ export default function Login() {
 
     setLoading(true);
     try {
-      if (isMfaRequired) {
-        // Validar TOTP do Google Authenticator
-        const response = await AuthAPI.validateTotp({
-          username: email,
-          codigoTotp: otp.trim(),
-        });
+      // Validar código 2FA enviado por email
+      const response = await AuthAPI.validateTotp({
+        username: email,
+        codigoTotp: otp.trim(),
+      });
 
-        if (response.token) {
-          const resolvedAccess = determineAccess(email);
-          AuthAPI.saveToken(response.token, email, resolvedAccess);
-          toast({ 
-            title: "Autenticação concluída", 
-            description: `Bem-vindo ao ONS${resolvedAccess ? ` (${resolvedAccess})` : ''}`, 
-            action: undefined 
-          });
-          navigate("/");
-        } else {
-          toast({ 
-            title: "Código inválido", 
-            description: "O código do Google Authenticator está incorreto", 
-            action: undefined 
-          });
-        }
+      if (response.token) {
+        const resolvedAccess = determineAccess(email);
+        AuthAPI.saveToken(response.token, email, resolvedAccess);
+        toast({ 
+          title: "Autenticação concluída", 
+          description: `Bem-vindo ao ONS${resolvedAccess ? ` (${resolvedAccess})` : ''}`, 
+          action: undefined 
+        });
+        navigate("/");
       } else {
-        // Fluxo antigo: código por email (fallback - simulado)
-        setTimeout(() => {
-          const resolvedAccess = determineAccess(email);
-          try {
-            const authUser = { email, accessType: resolvedAccess };
-            localStorage.setItem('authUser', JSON.stringify(authUser));
-          } catch (e) {
-            // ignore
-          }
-          toast({ 
-            title: "Autenticação concluída", 
-            description: `Bem-vindo ao ONS${resolvedAccess ? ` (${resolvedAccess})` : ''}`, 
-            action: undefined 
-          });
-          navigate("/");
-        }, 600);
+        toast({ 
+          title: "Código inválido", 
+          description: "O código está incorreto ou expirado", 
+          action: undefined 
+        });
       }
     } catch (error: any) {
       toast({ 
@@ -204,151 +158,64 @@ export default function Login() {
         <div className="p-8 bg-card rounded-lg shadow">
           {step === "credentials" ? (
           <div className="space-y-4">
-            {!showRegister ? (
-              <form onSubmit={submitCredentials} className="space-y-4">
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">E-mail</label>
-                  <Input
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    type="email"
-                    placeholder="seu@exemplo.com"
-                  />
-                </div>
+            <form onSubmit={submitCredentials} className="space-y-4">
+              <div>
+                <label className="text-sm mb-1 block text-muted-foreground">E-mail</label>
+                <Input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  type="email"
+                  placeholder="seu@exemplo.com"
+                />
+              </div>
 
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Senha (opcional)</label>
+              <div>
+                <label className="text-sm mb-1 block text-muted-foreground">Senha</label>
+                <div className="relative">
                   <Input
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    type="password"
-                    placeholder="•••••••• (opcional)"
+                    type={showPassword ? "text" : "password"}
+                    placeholder="••••••••"
+                    required
+                    className="pr-10"
                   />
-                </div>
-
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="text-sm text-muted-foreground">Ainda não tem conta?</div>
-                    <div className="mt-2">
-                      <button type="button" onClick={() => navigate('/forgot-password')} className="text-sm text-muted-foreground">Esqueci minha senha</button>
-                    </div>
-                  </div>
-                  <div>
-                    <button type="button" onClick={() => setShowRegister(true)} className="text-sm text-primary">Cadastrar-se</button>
-                  </div>
-                </div>
-
-                <div className="pt-2">
-                  <Button type="submit" className="w-full" disabled={loading}>
-                    {loading ? "Aguarde..." : "Entrar"}
-                  </Button>
-                </div>
-              </form>
-            ) : (
-              <div className="space-y-4">
-                <h3 className="text-lg font-medium">Cadastrar-se</h3>
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Razão Social</label>
-                  <Input value={companyName} onChange={(e)=>setCompanyName(e.target.value)} placeholder="Razão Social" />
-                </div>
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Nome Fantasia</label>
-                  <Input value={tradeName} onChange={(e)=>setTradeName(e.target.value)} placeholder="Nome Fantasia (opcional)" />
-                </div>
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">CNPJ</label>
-                  <Input value={cnpj} onChange={(e)=>setCnpj(e.target.value)} placeholder="00.000.000/0000-00" />
-                </div>
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Nome do Responsável</label>
-                  <Input value={contactName} onChange={(e)=>setContactName(e.target.value)} placeholder="Nome do responsável" />
-                </div>
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">E-mail</label>
-                  <Input value={regEmail} onChange={(e)=>setRegEmail(e.target.value)} type="email" placeholder="contato@empresa.com" />
-                </div>
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Telefone</label>
-                  <Input value={regPhone} onChange={(e)=>setRegPhone(e.target.value)} placeholder="(11) 99999-9999" />
-                </div>
-
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Tipo de Acesso</label>
-                  <select value={accessType} onChange={(e)=>setAccessType(e.target.value as 'AVD'|'AVC'|'')} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-                    <option value="">Selecione o tipo de acesso</option>
-                    <option value="AVD">AVD</option>
-                    <option value="AVC">AVC</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">CEP</label>
-                  <Input value={zip} onChange={(e)=>{ setZip(e.target.value); }} onBlur={(e)=>fetchAddressByCep(e.target.value)} placeholder="CEP" />
-                </div>
-
-                <div>
-                  <label className="text-sm mb-1 block text-muted-foreground">Endereço</label>
-                  <Input value={address} onChange={(e)=>setAddress(e.target.value)} placeholder="Logradouro" />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <Input value={number} onChange={(e)=>setNumber(e.target.value)} placeholder="Número" />
-                  <Input value={bairro} onChange={(e)=>setBairro(e.target.value)} placeholder="Bairro" />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <Input value={city} onChange={(e)=>setCity(e.target.value)} placeholder="Cidade" />
-                  <Input value={stateUf} onChange={(e)=>setStateUf(e.target.value)} placeholder="UF" />
-                </div>
-
-                <div className="flex items-center gap-2 pt-2">
-                  <Button onClick={() => {
-                    if(!companyName || !cnpj || !contactName || !regEmail || !accessType) {
-                      toast({ title: "Preencha os campos obrigatórios", description: "Verifique os campos de cadastro", action: undefined });
-                      return;
-                    }
-                    const pendingUser = {
-                      companyName,
-                      tradeName,
-                      cnpj,
-                      contactName,
-                      regEmail,
-                      regPhone,
-                      zip,
-                      address,
-                      number,
-                      bairro,
-                      city,
-                      stateUf,
-                      accessType
-                    };
-                    try {
-                      const existing = JSON.parse(localStorage.getItem('pendingUsers') || '[]');
-                      if (Array.isArray(existing)) {
-                        existing.push(pendingUser);
-                        localStorage.setItem('pendingUsers', JSON.stringify(existing));
-                      } else {
-                        localStorage.setItem('pendingUsers', JSON.stringify([pendingUser]));
-                      }
-                    } catch (e) {
-                      // ignore storage errors
-                    }
-                    toast({ title: "Cadastro enviado", description: `Seu cadastro (${accessType}) foi enviado para aprovação (simulado)`, action: undefined });
-                    setShowRegister(false);
-                  }}>
-                    Cadastrar
-                  </Button>
-                  <Button variant="ghost" onClick={() => setShowRegister(false)}>Cancelar</Button>
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                    aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
               </div>
-            )}
+
+              <div>
+                <button 
+                  type="button" 
+                  onClick={() => navigate('/forgot-password')} 
+                  className="text-sm text-muted-foreground hover:text-primary transition-colors"
+                >
+                  Esqueci minha senha
+                </button>
+              </div>
+
+              <div className="pt-2">
+                <Button type="submit" className="w-full" disabled={loading}>
+                  {loading ? "Aguarde..." : "Entrar"}
+                </Button>
+              </div>
+            </form>
           </div>
         ) : (
           <form onSubmit={verifyOtp} className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              {isMfaRequired 
-                ? "Insira o código de 6 dígitos do Google Authenticator." 
-                : "Insira o código de 6 dígitos enviado para seu e-mail."}
+              Insira o código de 6 dígitos enviado para seu e-mail.
             </p>
 
             <div>
@@ -392,9 +259,7 @@ export default function Login() {
                 setIsMfaRequired(false);
                 setOtp("");
               }}>Alterar credenciais</Button>
-              {!isMfaRequired && (
-                <Button variant="ghost" onClick={resendCode}>Reenviar código</Button>
-              )}
+              <Button variant="ghost" onClick={resendCode}>Reenviar código</Button>
             </div>
 
             <div>

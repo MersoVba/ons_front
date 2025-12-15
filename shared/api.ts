@@ -59,6 +59,31 @@ export interface ProcessarComprovanteResponse {
   erro?: string;
 }
 
+export interface ComprovantePagamentoRequest {
+  banco: string;
+  tipoDocumento: TipoDocumento;
+  numeroIdentificacao?: string;
+  agencia?: string;
+  conta?: string;
+  beneficiario?: string;
+  cnpjBeneficiario?: string;
+  pagador?: string;
+  dataVencimento?: string;
+  dataPagamento?: string;
+  valorDocumento?: number;
+  valorCobrado?: number;
+  cnpjPagador: string;
+  pdfBase64: string;
+  nomeArquivo: string;
+  dadosExtraidos?: PagamentoBoleto; // Para campos específicos de TED
+}
+
+export interface ComprovantePagamentoResponse {
+  mensagem: string;
+  dataEnvioComprovante: string;
+  linkDocumento?: string;
+}
+
 /**
  * Tipos para Autenticação e MFA
  */
@@ -70,6 +95,7 @@ export interface LoginRequest {
 export interface AuthenticationResponse {
   token?: string;
   mfaRequired?: boolean;
+  firstAccess?: boolean;
   message?: string;
 }
 

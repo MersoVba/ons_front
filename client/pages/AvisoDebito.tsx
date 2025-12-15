@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,7 +8,10 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle, DrawerTrigger } from '@/components/ui/drawer';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { toast } from '@/hooks/use-toast';
-import { ProcessarComprovanteResponse, PagamentoBoleto } from '@shared/api';
+import { ProcessarComprovanteResponse, PagamentoBoleto, ComprovantePagamentoRequest, ComprovantePagamentoResponse, TipoDocumento } from '@shared/api';
+import { AuthAPI } from '@/lib/auth-api';
+import { AvdAPI, IntegracaoUsuariaTransmissoraResponse, FaturaResponse } from '@/lib/avd-api';
+import { API_BASE_URL_WITHOUT_VERSION } from '@/lib/api-config';
 import {
   Upload,
   Building2,
@@ -26,12 +29,14 @@ import {
 } from 'lucide-react';
 
 interface ParcelaDebito {
+  cdParcela?: number;
   numParcela: number;
   data: string;
   valor: number;
   comprovante?: File;
   status: 'aguardando' | 'enviado' | 'pago';
   dadosExtraidos?: PagamentoBoleto;
+  linkDocumento?: string;
 }
 
 interface Usuaria {
@@ -55,6 +60,7 @@ const AvisoDebito = () => {
     banco: string;
     arquivo?: File;
   } | null>(null);
+  const [uploadingForUsuaria, setUploadingForUsuaria] = useState<{usuariaId: string, parcelaNumero: number} | null>(null);
 
   // Filter states
   const [filterUsuaria, setFilterUsuaria] = useState('');
@@ -138,7 +144,113 @@ const AvisoDebito = () => {
     }
   ];
 
-  const [usuarias, setUsuarias] = useState<Usuaria[]>(mockUsuarias);
+  const [usuarias, setUsuarias] = useState<Usuaria[]>([]);
+  const [loadingUsuarias, setLoadingUsuarias] = useState(false);
+
+  // Carregar dados do backend usando o endpoint de faturas
+  useEffect(() => {
+    const carregarFaturas = async () => {
+      setLoadingUsuarias(true);
+      try {
+        // Buscar todas as faturas com suas parcelas
+        const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(0, 5, 'ASC', 'transmissora');
+        
+        console.log('📋 Faturas carregadas da API:', faturas);
+        console.log('📋 Primeira parcela (exemplo):', faturas[0]?.parcelas?.[0]);
+        
+        // Agrupar faturas por usuária
+        const usuariasMap = new Map<string, Usuaria>();
+        
+        faturas.forEach((fatura: FaturaResponse) => {
+          if (!fatura.cnpjUsuaria || !fatura.usuaria) return;
+          
+          const usuariaKey = fatura.cnpjUsuaria;
+          
+          if (!usuariasMap.has(usuariaKey)) {
+            // Criar nova usuária
+            usuariasMap.set(usuariaKey, {
+              id: fatura.cdFatura?.toString() || fatura.cnpjUsuaria,
+              usuaria: fatura.usuaria || '',
+              cnpj: fatura.cnpjUsuaria || '',
+              codigoUsuaria: fatura.codigoUsuaria || '',
+              tributos: fatura.tributos ? Number(fatura.tributos) : 0,
+              valorTotal: fatura.valorTotal ? Number(fatura.valorTotal) : 0,
+              parcelas: []
+            });
+          }
+          
+          // Adicionar parcelas da fatura à usuária
+          const usuaria = usuariasMap.get(usuariaKey)!;
+          if (fatura.parcelas && fatura.parcelas.length > 0) {
+            fatura.parcelas.forEach((parcela) => {
+              if (parcela.numParcela && parcela.dataVencimento) {
+                // Verificar se a parcela já existe (evitar duplicatas)
+                const parcelaExistente = usuaria.parcelas.find(p => p.numParcela === parcela.numParcela);
+                
+                // Mapear id para cdParcela (API retorna como "id" mas backend espera "cdParcela")
+                const cdParcela = parcela.id || parcela.cdParcela;
+                
+                if (!parcelaExistente) {
+                  // Converter dataVencimento para ISO string
+                  const dataVencimento = new Date(parcela.dataVencimento + 'T00:00:00');
+                  
+                  if (!cdParcela) {
+                    console.error('❌ Parcela sem cdParcela (id):', {
+                      numParcela: parcela.numParcela,
+                      parcelaCompleta: parcela,
+                      id: parcela.id,
+                      cdParcela: parcela.cdParcela
+                    });
+                  }
+                  
+                  usuaria.parcelas.push({
+                    cdParcela: cdParcela,
+                    numParcela: parcela.numParcela,
+                    data: dataVencimento.toISOString(),
+                    valor: parcela.valor ? Number(parcela.valor) : 0,
+                    status: parcela.status === 'PAGO' ? 'pago' : 
+                           parcela.status === 'ENVIADO' ? 'enviado' : 
+                           'aguardando',
+                    linkDocumento: parcela.enderecoComprovante || undefined
+                  });
+                } else {
+                  // Atualizar o cdParcela se a parcela existente não tiver
+                  if (cdParcela && !parcelaExistente.cdParcela) {
+                    parcelaExistente.cdParcela = cdParcela;
+                    console.log('✅ cdParcela atualizado para parcela existente:', {
+                      numParcela: parcela.numParcela,
+                      cdParcela: cdParcela
+                    });
+                  }
+                }
+              }
+            });
+          }
+        });
+        
+        // Converter Map para Array e ordenar parcelas de cada usuária
+        const usuariasComParcelas: Usuaria[] = Array.from(usuariasMap.values()).map(usuaria => ({
+          ...usuaria,
+          parcelas: usuaria.parcelas.sort((a, b) => a.numParcela - b.numParcela)
+        }));
+
+        setUsuarias(usuariasComParcelas);
+      } catch (error: any) {
+        console.error('Erro ao carregar faturas:', error);
+        toast({
+          title: 'Erro ao carregar dados',
+          description: error.message || 'Não foi possível carregar as faturas',
+          variant: 'destructive'
+        });
+        // Em caso de erro, usar dados mockados como fallback
+        setUsuarias(mockUsuarias);
+      } finally {
+        setLoadingUsuarias(false);
+      }
+    };
+
+    carregarFaturas();
+  }, []);
 
   // Filter usuarias based on filter criteria
   const filteredUsuarias = useMemo(() => {
@@ -187,8 +299,10 @@ const AvisoDebito = () => {
     window.open(url, '_blank');
   };
 
-  const processarPDF = async (file: File, parcelaNumero: number) => {
+  const processarPDF = async (file: File, parcelaNumero: number, usuariaId?: string) => {
     setIsProcessingPDF(true);
+    const targetUsuariaId = usuariaId || selectedUsuariaForUpload?.id;
+    
     try {
       console.log('='.repeat(80));
       console.log('🚀 INICIANDO PROCESSAMENTO DE PDF');
@@ -259,17 +373,89 @@ const AvisoDebito = () => {
         console.log(JSON.stringify(result.dados, null, 2));
         console.log('='.repeat(80) + '\n');
 
-        // Atualizar parcela com dados extraídos
+        // Converter PDF para base64
+        const pdfBase64 = await fileToBase64(file);
+        
+        // Buscar usuária para obter CNPJ
+        const usuaria = usuarias.find(u => u.id === targetUsuariaId);
+        if (!usuaria) {
+          throw new Error('Usuária não encontrada');
+        }
+
+        // Preparar payload para enviar ao backend
+        // Converter datas de string ISO para LocalDate (YYYY-MM-DD)
+        const formatDateForBackend = (dateString?: string): string | undefined => {
+          if (!dateString) return undefined;
+          try {
+            const date = new Date(dateString);
+            return date.toISOString().split('T')[0]; // Formato YYYY-MM-DD
+          } catch {
+            return undefined;
+          }
+        };
+
+        const payload: ComprovantePagamentoRequest = {
+          banco: result.dados.banco || result.bancoDetectado || '',
+          tipoDocumento: (result.dados.tipoDocumento as TipoDocumento) || TipoDocumento.BOLETO,
+          numeroIdentificacao: result.dados.numeroIdentificacao,
+          agencia: result.dados.agencia,
+          conta: result.dados.conta,
+          beneficiario: result.dados.beneficiario,
+          cnpjBeneficiario: result.dados.cnpjBeneficiario,
+          pagador: result.dados.pagador,
+          dataVencimento: formatDateForBackend(result.dados.dataVencimento),
+          dataPagamento: formatDateForBackend(result.dados.dataPagamento),
+          valorDocumento: result.dados.valorDocumento,
+          valorCobrado: result.dados.valorCobrado,
+          cnpjPagador: usuaria.cnpj.replace(/\D/g, ''), // Remover formatação do CNPJ
+          pdfBase64: pdfBase64,
+          nomeArquivo: file.name
+        };
+
+        // Buscar o id da parcela (cdParcela mapeado da API)
+        const parcelaAtual = usuaria.parcelas.find(p => p.numParcela === parcelaNumero);
+        const idParcela = parcelaAtual?.cdParcela; // cdParcela é o id da parcela
+
+        if (!idParcela || idParcela === null || idParcela === undefined) {
+          console.error('❌ idParcela não encontrado ou inválido:', {
+            parcelaNumero,
+            parcelaAtual,
+            idParcela,
+            todasParcelas: usuaria.parcelas.map(p => ({
+              numParcela: p.numParcela,
+              cdParcela: p.cdParcela
+            }))
+          });
+          throw new Error('idParcela não encontrado. Por favor, recarregue a página e tente novamente.');
+        }
+
+        console.log('📦 idParcela encontrado e validado:', {
+          idParcela,
+          tipo: typeof idParcela,
+          parcelaNumero
+        });
+
+        // Adicionar dados extraídos ao payload para campos específicos de TED
+        payload.dadosExtraidos = result.dados;
+
+        // Enviar para o backend
+        console.log('📤 Enviando comprovante para o backend...');
+        const backendResponse = await enviarComprovanteBackend(payload, idParcela);
+        console.log('✅ Resposta do backend:', backendResponse);
+
+        // Atualizar parcela com dados extraídos e link do documento
         setUsuarias(prev => prev.map(usr => {
-          if (usr.id === selectedUsuariaForUpload?.id) {
+          if (usr.id === targetUsuariaId) {
             return {
               ...usr,
               parcelas: usr.parcelas.map(parc => {
                 if (parc.numParcela === parcelaNumero) {
                   return {
                     ...parc,
+                    cdParcela: parc.cdParcela || idParcela, // Garantir que o cdParcela seja preservado
                     comprovante: file,
                     dadosExtraidos: result.dados,
+                    linkDocumento: backendResponse.linkDocumento,
                     status: 'enviado' as const
                   };
                 }
@@ -280,14 +466,6 @@ const AvisoDebito = () => {
           return usr;
         }));
 
-        // Não abrir modal automaticamente - o usuário pode abrir manualmente se quiser
-        // setDadosExtraidosModal({
-        //   parcelaNumero,
-        //   dados: result.dados,
-        //   banco: result.bancoDetectado || 'DESCONHECIDO',
-        //   arquivo: file
-        // });
-
         const tipoDoc = result.dados.tipoDocumento || 'BOLETO';
         const tipoDocLabel = tipoDoc === 'BOLETO' ? 'Boleto' : 
                             tipoDoc === 'TED' ? 'TED' : 
@@ -295,8 +473,8 @@ const AvisoDebito = () => {
                             tipoDoc === 'DOC' ? 'DOC' : tipoDoc;
 
         toast({
-          title: 'PDF processado com sucesso',
-          description: `Comprovante ${tipoDocLabel} processado${result.bancoDetectado ? ` (${result.bancoDetectado})` : ''}. Dados extraídos com sucesso.`
+          title: 'Comprovante enviado com sucesso',
+          description: `Comprovante ${tipoDocLabel} processado e enviado ao backend${result.bancoDetectado ? ` (${result.bancoDetectado})` : ''}.`
         });
       } else {
         console.error('❌ Erro na resposta do servidor:', result);
@@ -314,10 +492,114 @@ const AvisoDebito = () => {
     }
   };
 
-  const handleUploadFile = async (parcelaNumero: number, file: File) => {
+  // Função auxiliar para converter File para base64
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const base64String = (reader.result as string).split(',')[1]; // Remove o prefixo data:application/pdf;base64,
+        resolve(base64String);
+      };
+      reader.onerror = error => reject(error);
+    });
+  };
+
+  // Função para enviar comprovante ao backend
+  // Envia todos os dados (JSON + base64) em uma única chamada para /comprovantes/pagamentos
+  const enviarComprovanteBackend = async (payload: ComprovantePagamentoRequest, idParcela?: number): Promise<ComprovantePagamentoResponse> => {
+    const token = AuthAPI.getToken();
+    if (!token) {
+      throw new Error('Usuário não autenticado');
+    }
+
+    if (!idParcela || idParcela === null || idParcela === undefined || isNaN(idParcela)) {
+      console.error('❌ idParcela inválido na função enviarComprovanteBackend:', idParcela);
+      throw new Error('idParcela é obrigatório e deve ser um número válido');
+    }
+
+    const API_BASE_URL = API_BASE_URL_WITHOUT_VERSION;
+    const cleanToken = token.trim().replace(/[\r\n]/g, '');
+    
+    // Preparar payload completo conforme estrutura da API
+    const requestPayload: any = {
+      idParcela: Number(idParcela),
+      banco: payload.banco,
+      tipoDocumento: payload.tipoDocumento,
+      numeroIdentificacao: payload.numeroIdentificacao,
+      agencia: payload.agencia,
+      conta: payload.conta,
+      beneficiario: payload.beneficiario,
+      cnpjBeneficiario: payload.cnpjBeneficiario,
+      pagador: payload.pagador,
+      dataVencimento: payload.dataVencimento,
+      dataPagamento: payload.dataPagamento,
+      valorDocumento: payload.valorDocumento,
+      valorCobrado: payload.valorCobrado,
+      cnpjPagador: payload.cnpjPagador,
+      comprovanteBase64: payload.pdfBase64
+    };
+
+    // Adicionar campos específicos para TED se o tipo de documento for TED
+    if (payload.tipoDocumento === TipoDocumento.TED && payload.dadosExtraidos) {
+      const dados = payload.dadosExtraidos;
+      requestPayload.bancoDestino = dados.bancoDestino;
+      requestPayload.bancoDestinoNumero = dados.bancoDestinoNumero;
+      requestPayload.bancoDestinoISPB = dados.bancoDestinoISPB;
+      requestPayload.agenciaDestino = dados.agenciaDestino;
+      requestPayload.contaDestino = dados.contaDestino;
+      requestPayload.finalidade = dados.finalidade;
+      requestPayload.controle = dados.controle;
+      requestPayload.dataHoraSolicitacao = dados.dataHoraSolicitacao;
+    }
+
+    console.log('📤 Enviando comprovante completo para /comprovantes/pagamentos:', {
+      endpoint: `${API_BASE_URL}/comprovantes/pagamentos`,
+      idParcela: idParcela,
+      tipoDocumento: payload.tipoDocumento,
+      banco: payload.banco,
+      cnpjPagador: payload.cnpjPagador,
+      comprovanteBase64Length: payload.pdfBase64?.length || 0
+    });
+
+    const response = await fetch(`${API_BASE_URL}/comprovantes/pagamentos`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cleanToken}`,
+      },
+      body: JSON.stringify(requestPayload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMessage = 'Erro ao enviar comprovante';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.message || errorJson.erro || errorMessage;
+      } catch {
+        errorMessage = errorText || `Erro HTTP ${response.status}`;
+      }
+      console.error('❌ Erro ao enviar comprovante:', errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    const result = await response.json();
+    console.log('✅ Comprovante enviado com sucesso:', result);
+    
+    return {
+      mensagem: result.mensagem || 'Comprovante enviado com sucesso',
+      dataEnvioComprovante: result.dataEnvioComprovante || new Date().toISOString(),
+      linkDocumento: result.linkDocumento
+    };
+  };
+
+  const handleUploadFile = async (parcelaNumero: number, file: File, usuariaId?: string) => {
+    const targetUsuariaId = usuariaId || selectedUsuariaForUpload?.id;
+    
     // Se for PDF, processar automaticamente
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-      await processarPDF(file, parcelaNumero);
+      await processarPDF(file, parcelaNumero, targetUsuariaId);
     } else {
       // Para outros tipos de arquivo, apenas salvar
       console.log('=== COMPROVANTE ANEXADO (NÃO PDF) ===');
@@ -328,7 +610,7 @@ const AvisoDebito = () => {
       console.log('======================================');
 
       setUsuarias(prev => prev.map(usr => {
-        if (usr.id === selectedUsuariaForUpload?.id) {
+        if (usr.id === targetUsuariaId) {
           return {
             ...usr,
             parcelas: usr.parcelas.map(parc => {
@@ -350,6 +632,27 @@ const AvisoDebito = () => {
         description: `Comprovante enviado com sucesso para parcela ${parcelaNumero}`
       });
     }
+    
+    // Limpar estado de upload
+    if (uploadingForUsuaria) {
+      setUploadingForUsuaria(null);
+    }
+  };
+
+  const handleQuickUpload = (usuaria: Usuaria, parcelaNumero: number) => {
+    setUploadingForUsuaria({ usuariaId: usuaria.id, parcelaNumero });
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.pdf,.jpg,.jpeg,.png';
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        handleUploadFile(parcelaNumero, file, usuaria.id);
+      } else {
+        setUploadingForUsuaria(null);
+      }
+    };
+    input.click();
   };
 
   const handleRemoverComprovante = (parcelaNumero: number) => {
@@ -383,7 +686,7 @@ const AvisoDebito = () => {
   };
 
   const getParcelaStatusBadge = (parcela: ParcelaDebito) => {
-    if (parcela.comprovante) {
+    if (parcela.comprovante || parcela.linkDocumento) {
       return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
     }
     return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Aguardando</Badge>;
@@ -397,6 +700,7 @@ const AvisoDebito = () => {
           <h1 className="text-3xl font-bold text-foreground">Aviso de Débito</h1>
           <p className="text-muted-foreground">
             Gerenciar débitos e enviar comprovantes de pagamento
+            {loadingUsuarias && <span className="ml-2 text-blue-500">Carregando...</span>}
           </p>
         </div>
         <Drawer open={isFilterDrawerOpen} onOpenChange={setIsFilterDrawerOpen}>
@@ -493,7 +797,12 @@ const AvisoDebito = () => {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {filteredUsuarias.length === 0 ? (
+          {loadingUsuarias ? (
+            <div className="text-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin mx-auto mb-2" />
+              <p className="text-muted-foreground">Carregando faturas...</p>
+            </div>
+          ) : filteredUsuarias.length === 0 ? (
             <p className="text-center text-muted-foreground py-8">Nenhuma usuária encontrada com os filtros aplicados.</p>
           ) : (
             <div className="border rounded-lg overflow-x-auto">
@@ -537,15 +846,38 @@ const AvisoDebito = () => {
                           {statusGeral === 'pendente' && <Badge variant="outline">Pendente</Badge>}
                         </TableCell>
                         <TableCell className="text-center">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleUsuariaClick(usuaria)}
-                            className="h-8 w-8 p-0"
-                            title="Gerenciar comprovantes"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </Button>
+                          <div className="flex items-center justify-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleUsuariaClick(usuaria)}
+                              className="h-8 w-8 p-0"
+                              title="Gerenciar comprovantes"
+                            >
+                              <Eye className="h-4 w-4" />
+                            </Button>
+                            {usuaria.parcelas.length > 0 && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  // Upload para a primeira parcela sem comprovante, ou primeira parcela se todas tiverem
+                                  const parcelaSemComprovante = usuaria.parcelas.find(p => !p.comprovante);
+                                  const parcelaParaUpload = parcelaSemComprovante || usuaria.parcelas[0];
+                                  handleQuickUpload(usuaria, parcelaParaUpload.numParcela);
+                                }}
+                                className="h-8 w-8 p-0"
+                                title="Upload de comprovante"
+                                disabled={uploadingForUsuaria?.usuariaId === usuaria.id && isProcessingPDF}
+                              >
+                                {uploadingForUsuaria?.usuariaId === usuaria.id && isProcessingPDF ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Upload className="h-4 w-4" />
+                                )}
+                              </Button>
+                            )}
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
@@ -612,13 +944,15 @@ const AvisoDebito = () => {
                         <Label className="text-sm font-medium">Comprovante de Pagamento</Label>
                         
                         {/* Comprovante Anexado */}
-                        {parcela.comprovante ? (
+                        {parcela.comprovante || parcela.linkDocumento ? (
                           <div className="border rounded-lg p-4 bg-muted/50 mb-3">
                             <div className="flex items-center gap-3 mb-3">
                               <FileText className="h-6 w-6 text-success flex-shrink-0" />
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-1">
-                                  <p className="text-sm font-medium truncate">{parcela.comprovante.name}</p>
+                                  <p className="text-sm font-medium truncate">
+                                    {parcela.comprovante?.name || 'Documento enviado'}
+                                  </p>
                                   {parcela.dadosExtraidos?.tipoDocumento && (
                                     <Badge variant="secondary" className="text-xs">
                                       {parcela.dadosExtraidos.tipoDocumento === 'BOLETO' ? 'Boleto' : 
@@ -629,7 +963,20 @@ const AvisoDebito = () => {
                                     </Badge>
                                   )}
                                 </div>
-                                <p className="text-xs text-muted-foreground">{(parcela.comprovante.size / 1024).toFixed(2)} KB</p>
+                                {parcela.comprovante && (
+                                  <p className="text-xs text-muted-foreground">{(parcela.comprovante.size / 1024).toFixed(2)} KB</p>
+                                )}
+                                {parcela.linkDocumento && (
+                                  <a 
+                                    href={parcela.linkDocumento} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-primary hover:underline flex items-center gap-1 mt-1"
+                                  >
+                                    <FileText className="h-3 w-3" />
+                                    Ver documento no storage
+                                  </a>
+                                )}
                                 {parcela.dadosExtraidos && (
                                   <div className="flex items-center gap-2 mt-1">
                                     <Badge variant="outline" className="text-xs">
@@ -654,29 +1001,44 @@ const AvisoDebito = () => {
                                   onClick={() => setDadosExtraidosModal({
                                     parcelaNumero: parcela.numParcela,
                                     dados: parcela.dadosExtraidos!,
-                                    banco: parcela.dadosExtraidos.banco || 'DESCONHECIDO'
+                                    banco: parcela.dadosExtraidos.banco || 'DESCONHECIDO',
+                                    arquivo: parcela.comprovante
                                   })}
                                 >
                                   <FileCheck className="h-4 w-4 mr-2" />
                                   Ver Dados
                                 </Button>
                               )}
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handlePreviewComprovante(parcela.comprovante!)}
-                              >
-                                <Eye className="h-4 w-4 mr-2" />
-                                Visualizar
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleDownloadComprovante(parcela.comprovante!, parcela.numParcela)}
-                              >
-                                <Download className="h-4 w-4 mr-2" />
-                                Download
-                              </Button>
+                              {parcela.linkDocumento && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => window.open(parcela.linkDocumento, '_blank')}
+                                >
+                                  <FileText className="h-4 w-4 mr-2" />
+                                  Abrir no Storage
+                                </Button>
+                              )}
+                              {parcela.comprovante && (
+                                <>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => handlePreviewComprovante(parcela.comprovante!)}
+                                  >
+                                    <Eye className="h-4 w-4 mr-2" />
+                                    Visualizar
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => handleDownloadComprovante(parcela.comprovante!, parcela.numParcela)}
+                                  >
+                                    <Download className="h-4 w-4 mr-2" />
+                                    Download
+                                  </Button>
+                                </>
+                              )}
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -691,7 +1053,7 @@ const AvisoDebito = () => {
                         ) : null}
 
                         {/* Área de Upload */}
-                        {!parcela.comprovante && (
+                        {!parcela.comprovante && !parcela.linkDocumento && (
                           <div className="border-2 border-dashed rounded-lg p-6 text-center hover:bg-muted/50 transition-colors">
                             <label className={`cursor-pointer block ${isProcessingPDF ? 'opacity-50 pointer-events-none' : ''}`}>
                               {isProcessingPDF ? (
@@ -724,7 +1086,7 @@ const AvisoDebito = () => {
                         )}
 
                         {/* Opção de Trocar Comprovante */}
-                        {parcela.comprovante && (
+                        {(parcela.comprovante || parcela.linkDocumento) && (
                           <div className="border rounded-lg p-4 bg-muted/30">
                             <Label className="text-xs text-muted-foreground mb-2 block">Trocar comprovante</Label>
                             <label className={`cursor-pointer block ${isProcessingPDF ? 'opacity-50 pointer-events-none' : ''}`}>

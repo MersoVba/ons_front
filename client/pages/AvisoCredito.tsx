@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle, DrawerTrigger } from '@/components/ui/drawer';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { toast } from '@/hooks/use-toast';
+import { AvdAPI, FaturaResponse } from '@/lib/avd-api';
+import { AuthAPI } from '@/lib/auth-api';
 import {
   Upload,
   Building2,
@@ -18,15 +20,18 @@ import {
   Filter,
   X,
   Eye,
-  Download
+  Download,
+  Loader2
 } from 'lucide-react';
 
 interface Parcela {
+  cdParcela?: number;
   numero: number;
   dataPagamento: string;
   valor: number;
   comprovante?: File;
   status: 'aguardando' | 'enviado' | 'pago';
+  linkDocumento?: string; // Link para o documento anexado na parcela
 }
 
 interface Empresa {
@@ -220,6 +225,97 @@ const AvisoCredito = () => {
   ];
 
   const [empresas, setEmpresas] = useState<Empresa[]>(mockEmpresas);
+  const [loadingEmpresas, setLoadingEmpresas] = useState(false);
+
+  // Carregar dados do backend usando o endpoint de faturas
+  useEffect(() => {
+    const carregarFaturas = async () => {
+      setLoadingEmpresas(true);
+      try {
+        // Buscar todas as faturas com suas parcelas
+        const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(0, 5, 'ASC', 'transmissora');
+        
+        // Converter faturas para o formato de empresas (transmissoras)
+        const empresasMap = new Map<string, Empresa>();
+        
+        faturas.forEach((fatura: FaturaResponse) => {
+          if (!fatura.cnpjTransmissora || !fatura.transmissora) return;
+          
+          const empresaKey = fatura.cnpjTransmissora;
+          
+          if (!empresasMap.has(empresaKey)) {
+            // Criar nova empresa (transmissora)
+            empresasMap.set(empresaKey, {
+              id: fatura.cdFatura?.toString() || empresaKey,
+              nome: fatura.transmissora || '',
+              cnpj: fatura.cnpjTransmissora || '',
+              contato: fatura.transmissora || '', // Usar nome da transmissora como contato
+              email: '', // Email não vem na resposta da API
+              valorTotal: fatura.valorTotal ? Number(fatura.valorTotal) : 0,
+              parcelas: []
+            });
+          }
+          
+          // Adicionar parcelas da fatura à empresa
+          const empresa = empresasMap.get(empresaKey)!;
+          if (fatura.parcelas && fatura.parcelas.length > 0) {
+            fatura.parcelas.forEach((parcela) => {
+              if (parcela.numParcela && parcela.dataVencimento) {
+                // Verificar se a parcela já existe (evitar duplicatas)
+                const parcelaExistente = empresa.parcelas.find(p => p.numero === parcela.numParcela);
+                if (!parcelaExistente) {
+                  // Converter dataVencimento para formato de data
+                  const dataVencimento = new Date(parcela.dataVencimento + 'T00:00:00');
+                  // Mapear id para cdParcela (API retorna como "id")
+                  const cdParcela = parcela.id || parcela.cdParcela;
+                  empresa.parcelas.push({
+                    cdParcela: cdParcela,
+                    numero: parcela.numParcela,
+                    dataPagamento: dataVencimento.toISOString().split('T')[0],
+                    valor: parcela.valor ? Number(parcela.valor) : 0,
+                    status: parcela.status === 'PAGO' ? 'pago' : 
+                           parcela.status === 'ENVIADO' ? 'enviado' : 
+                           'aguardando',
+                    linkDocumento: parcela.enderecoComprovante || undefined
+                  });
+                } else {
+                  // Atualizar linkDocumento e cdParcela se a parcela existente não tiver
+                  if (parcela.enderecoComprovante && !parcelaExistente.linkDocumento) {
+                    parcelaExistente.linkDocumento = parcela.enderecoComprovante;
+                  }
+                  const cdParcela = parcela.id || parcela.cdParcela;
+                  if (cdParcela && !parcelaExistente.cdParcela) {
+                    parcelaExistente.cdParcela = cdParcela;
+                  }
+                }
+              }
+            });
+          }
+        });
+        
+        // Converter Map para Array e ordenar parcelas de cada empresa
+        const empresasComParcelas: Empresa[] = Array.from(empresasMap.values()).map(empresa => ({
+          ...empresa,
+          parcelas: empresa.parcelas.sort((a, b) => a.numero - b.numero)
+        }));
+
+        setEmpresas(empresasComParcelas);
+      } catch (error: any) {
+        console.error('Erro ao carregar faturas:', error);
+        toast({
+          title: 'Erro ao carregar dados',
+          description: error.message || 'Não foi possível carregar as faturas',
+          variant: 'destructive'
+        });
+        // Em caso de erro, usar dados mockados como fallback
+        setEmpresas(mockEmpresas);
+      } finally {
+        setLoadingEmpresas(false);
+      }
+    };
+
+    carregarFaturas();
+  }, []);
 
   // Filter empresas based on filter criteria
   const filteredEmpresas = useMemo(() => {
@@ -254,20 +350,71 @@ const AvisoCredito = () => {
     setIsUploadModalOpen(true);
   };
 
-  const handleDownloadComprovante = (comprovante: File, parcelaNumero: number) => {
-    const url = URL.createObjectURL(comprovante);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${selectedCompanyForUpload?.nome}-parcela-${parcelaNumero}-${comprovante.name}`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const handleDownloadComprovante = async (comprovante: File | string, parcelaNumero: number) => {
+    if (typeof comprovante === 'string') {
+      // Se for uma URL (linkDocumento), fazer download do arquivo
+      try {
+        const token = AuthAPI.getToken();
+        if (!token) {
+          throw new Error('Usuário não autenticado');
+        }
+
+        const cleanToken = token.trim().replace(/[\r\n]/g, '');
+        const response = await fetch(comprovante, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${cleanToken}`,
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error('Erro ao baixar documento');
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${selectedCompanyForUpload?.nome}-parcela-${parcelaNumero}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        toast({
+          title: 'Download iniciado',
+          description: 'Documento baixado com sucesso'
+        });
+      } catch (error: any) {
+        console.error('Erro ao baixar documento:', error);
+        toast({
+          title: 'Erro ao baixar documento',
+          description: error.message || 'Não foi possível baixar o documento',
+          variant: 'destructive'
+        });
+      }
+    } else {
+      // Se for um File, usar o método original
+      const url = URL.createObjectURL(comprovante);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${selectedCompanyForUpload?.nome}-parcela-${parcelaNumero}-${comprovante.name}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
   };
 
-  const handlePreviewComprovante = (comprovante: File) => {
-    const url = URL.createObjectURL(comprovante);
-    window.open(url, '_blank');
+  const handlePreviewComprovante = async (comprovante: File | string) => {
+    if (typeof comprovante === 'string') {
+      // Se for uma URL (linkDocumento), abrir em nova aba
+      window.open(comprovante, '_blank');
+    } else {
+      // Se for um File, usar o método original
+      const url = URL.createObjectURL(comprovante);
+      window.open(url, '_blank');
+    }
   };
 
   const handleUploadFile = (parcelaNumero: number, file: File) => {
@@ -296,7 +443,7 @@ const AvisoCredito = () => {
   };
 
   const getParcelaStatusBadge = (parcela: Parcela) => {
-    if (parcela.comprovante) {
+    if (parcela.comprovante || parcela.linkDocumento) {
       return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
     }
     return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Aguardando</Badge>;
@@ -418,7 +565,12 @@ const AvisoCredito = () => {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {filteredEmpresas.length === 0 ? (
+          {loadingEmpresas ? (
+            <div className="text-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin mx-auto mb-2" />
+              <p className="text-muted-foreground">Carregando faturas...</p>
+            </div>
+          ) : filteredEmpresas.length === 0 ? (
             <p className="text-center text-muted-foreground py-8">Nenhuma empresa encontrada com os filtros aplicados.</p>
           ) : (
             <div className="border rounded-lg overflow-x-auto">
@@ -437,8 +589,8 @@ const AvisoCredito = () => {
                 </TableHeader>
                 <TableBody>
                   {filteredEmpresas.map((empresa) => {
-                    const totalComprovantes = empresa.parcelas.filter(p => p.comprovante).length;
-                    const statusGeral = totalComprovantes === 3 ? 'completo' : totalComprovantes > 0 ? 'parcial' : 'pendente';
+                    const totalComprovantes = empresa.parcelas.filter(p => p.comprovante || p.linkDocumento).length;
+                    const statusGeral = totalComprovantes === empresa.parcelas.length ? 'completo' : totalComprovantes > 0 ? 'parcial' : 'pendente';
 
                     return (
                       <TableRow key={empresa.id}>
@@ -458,7 +610,7 @@ const AvisoCredito = () => {
                         </TableCell>
                         <TableCell className="text-center">
                           {statusGeral === 'completo' && <Badge className="bg-success">Completo</Badge>}
-                          {statusGeral === 'parcial' && <Badge variant="secondary">Parcial ({totalComprovantes}/3)</Badge>}
+                          {statusGeral === 'parcial' && <Badge variant="secondary">Parcial ({totalComprovantes}/{empresa.parcelas.length})</Badge>}
                           {statusGeral === 'pendente' && <Badge variant="outline">Pendente</Badge>}
                         </TableCell>
                         <TableCell className="text-center">
@@ -572,13 +724,28 @@ const AvisoCredito = () => {
                         ) : (
                           // AVC: Preview/Download interface
                           <>
-                            {parcela.comprovante ? (
+                            {parcela.comprovante || parcela.linkDocumento ? (
                               <div className="border rounded-lg p-4 bg-success/10">
                                 <div className="flex items-center gap-3 mb-3">
                                   <FileText className="h-6 w-6 text-success flex-shrink-0" />
                                   <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-medium truncate">{parcela.comprovante.name}</p>
-                                    <p className="text-xs text-muted-foreground">{(parcela.comprovante.size / 1024).toFixed(2)} KB</p>
+                                    <p className="text-sm font-medium truncate">
+                                      {parcela.comprovante?.name || 'Documento anexado'}
+                                    </p>
+                                    {parcela.comprovante && (
+                                      <p className="text-xs text-muted-foreground">{(parcela.comprovante.size / 1024).toFixed(2)} KB</p>
+                                    )}
+                                    {parcela.linkDocumento && (
+                                      <a 
+                                        href={parcela.linkDocumento} 
+                                        target="_blank" 
+                                        rel="noopener noreferrer"
+                                        className="text-xs text-primary hover:underline flex items-center gap-1 mt-1"
+                                      >
+                                        <FileText className="h-3 w-3" />
+                                        Ver documento no storage
+                                      </a>
+                                    )}
                                   </div>
                                   <CheckCircle className="h-5 w-5 text-success flex-shrink-0" />
                                 </div>
@@ -587,7 +754,7 @@ const AvisoCredito = () => {
                                     size="sm"
                                     variant="outline"
                                     className="flex-1"
-                                    onClick={() => handlePreviewComprovante(parcela.comprovante!)}
+                                    onClick={() => handlePreviewComprovante(parcela.comprovante || parcela.linkDocumento!)}
                                   >
                                     <Eye className="h-4 w-4 mr-2" />
                                     Visualizar
@@ -596,7 +763,7 @@ const AvisoCredito = () => {
                                     size="sm"
                                     variant="outline"
                                     className="flex-1"
-                                    onClick={() => handleDownloadComprovante(parcela.comprovante!, parcela.numero)}
+                                    onClick={() => handleDownloadComprovante(parcela.comprovante || parcela.linkDocumento!, parcela.numero)}
                                   >
                                     <Download className="h-4 w-4 mr-2" />
                                     Download
