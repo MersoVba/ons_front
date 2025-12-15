@@ -6,17 +6,20 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { lazy, Suspense } from "react";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
-import Dashboard from "./pages/Dashboard";
-import AvisoDebito from "./pages/AvisoDebito";
-import AvisoCredito from "./pages/AvisoCredito";
-import NotFound from "./pages/NotFound";
-import Login from "./pages/Login";
-import ForgotPassword from "./pages/ForgotPassword";
-import ResetPassword from "./pages/ResetPassword";
-import Profile from "./pages/Profile";
-import Forbidden from "./pages/Forbidden";
+
+// Lazy load das páginas para code-splitting
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const AvisoDebito = lazy(() => import("./pages/AvisoDebito"));
+const AvisoCredito = lazy(() => import("./pages/AvisoCredito"));
+const NotFound = lazy(() => import("./pages/NotFound"));
+const Login = lazy(() => import("./pages/Login"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword"));
+const Profile = lazy(() => import("./pages/Profile"));
+const Forbidden = lazy(() => import("./pages/Forbidden"));
 
 const queryClient = new QueryClient();
 
@@ -64,28 +67,37 @@ const seedMockData = () => {
 
 seedMockData();
 
+// Componente de loading para Suspense
+const PageLoader = () => (
+  <div className="flex items-center justify-center min-h-screen">
+    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
+  </div>
+);
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
 
-          {/* Routes that require authentication and the main Layout */}
-          <Route element={<RequireAuth><Layout /></RequireAuth>}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/aviso-debito" element={<AvisoDebito />} />
-            <Route path="/aviso-credito" element={<AvisoCredito />} />
-            <Route path="/profile" element={<Profile />} />
-            <Route path="/forbidden" element={<Forbidden />} />
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-            <Route path="*" element={<NotFound />} />
-          </Route>
-        </Routes>
+            {/* Routes that require authentication and the main Layout */}
+            <Route element={<RequireAuth><Layout /></RequireAuth>}>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/aviso-debito" element={<AvisoDebito />} />
+              <Route path="/aviso-credito" element={<AvisoCredito />} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/forbidden" element={<Forbidden />} />
+              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+              <Route path="*" element={<NotFound />} />
+            </Route>
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
