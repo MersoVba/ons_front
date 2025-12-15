@@ -47,35 +47,69 @@ app.get("/robots.txt", (_req, res) => {
 });
 
 // Serve static files from dist/spa
+// In Vercel, process.cwd() points to /var/task
 const distPath = path.join(process.cwd(), "dist/spa");
+console.log("📁 Dist path:", distPath);
+console.log("📁 Process cwd:", process.cwd());
 
-// Serve static files (JS, CSS, images, etc.)
+// Configure MIME types for JavaScript modules
+app.use((req, res, next) => {
+  // Set correct MIME type for .js files (ES modules)
+  if (req.path.endsWith('.js')) {
+    res.type('application/javascript');
+  }
+  // Set correct MIME type for .css files
+  if (req.path.endsWith('.css')) {
+    res.type('text/css');
+  }
+  next();
+});
+
+// Serve static files (JS, CSS, images, etc.) - MUST be before catch-all
 app.use(express.static(distPath, {
   maxAge: "1y",
   etag: true,
   lastModified: true,
-  index: false // Don't serve index.html automatically
+  index: false,
+  setHeaders: (res, filePath) => {
+    // Ensure JavaScript files are served with correct MIME type
+    if (filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    }
+    // Ensure CSS files are served with correct MIME type
+    if (filePath.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css; charset=utf-8');
+    }
+  }
 }));
 
 // SPA fallback - serve index.html for all non-API routes
+// This catches routes like /login, /, /dashboard, etc.
 app.get("*", (req, res) => {
   // Skip API routes
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({ error: "API endpoint not found" });
   }
 
-  // Skip static file extensions
-  const staticExtensions = [".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".json", ".xml", ".txt"];
+  // Skip static file extensions (these should be handled by express.static above)
+  const staticExtensions = [".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".json", ".xml", ".txt", ".webp", ".avif"];
   if (staticExtensions.some(ext => req.path.toLowerCase().endsWith(ext))) {
     return res.status(404).json({ error: "Static file not found" });
   }
 
-  // Serve index.html for SPA routing
+  // Serve index.html for SPA routing (React Router will handle client-side routing)
   const indexPath = path.join(distPath, "index.html");
   res.sendFile(indexPath, (err) => {
     if (err) {
-      console.error("Error serving index.html:", err);
-      res.status(500).json({ error: "Internal server error" });
+      console.error("❌ Error serving index.html:", err);
+      console.error("   Path requested:", req.path);
+      console.error("   Dist path:", distPath);
+      res.status(500).json({ 
+        error: "Internal server error",
+        message: err.message 
+      });
+    } else {
+      console.log("✅ Served index.html for:", req.path);
     }
   });
 });
