@@ -76,7 +76,9 @@ app.get("/robots.txt", (_req, res) => {
 // Serve static assets with explicit MIME types (CRITICAL for ES modules)
 // This route MUST come before express.static to ensure correct MIME types
 app.get("/assets/:path*", (req, res) => {
-  const assetPath = `/assets/${req.params.path || ''}`;
+  // Express uses 'path*' as the parameter name for :path* routes
+  const pathParam = (req.params as any)['path*'] || '';
+  const assetPath = `/assets/${pathParam}`;
   const ext = path.extname(assetPath).toLowerCase();
   
   // Set Content-Type header BEFORE sending file
