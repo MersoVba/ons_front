@@ -42,16 +42,15 @@ app.post("/api/pagamento-boleto/fake", handleFakeEnvio);
 // Use process.cwd() for Vercel serverless environment
 const distPath = path.join(process.cwd(), "dist/spa");
 
-// Serve static files
-app.use(express.static(distPath));
-
 // Handle React Router - serve index.html for all non-API routes
+// Note: Vercel handles static files automatically, so we only need to serve index.html for SPA routing
 app.get("*", (req, res) => {
   // Don't serve index.html for API routes
   if (req.path.startsWith("/api/") || req.path.startsWith("/health")) {
     return res.status(404).json({ error: "API endpoint not found" });
   }
 
+  // Serve index.html for SPA routing
   res.sendFile(path.join(distPath, "index.html"));
 });
 
