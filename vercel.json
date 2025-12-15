@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": ".",
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "dist/**"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api"
+    },
+    {
+      "src": "/(.*\\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot))",
+      "dest": "/dist/spa/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api"
+    }
+  ]
+}
+
