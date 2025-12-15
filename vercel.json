@@ -5,7 +5,7 @@
   "functions": {
     "api/index.ts": {
       "runtime": "@vercel/node",
-      "includeFiles": "server/**",
+      "includeFiles": "{server/**,shared/**}",
       "maxDuration": 60
     }
   },
