@@ -52,18 +52,6 @@
       "destination": "/api"
     },
     {
-      "source": "/assets/:path*",
-      "destination": "/dist/spa/assets/:path*"
-    },
-    {
-      "source": "/favicon.ico",
-      "destination": "/dist/spa/favicon.ico"
-    },
-    {
-      "source": "/robots.txt",
-      "destination": "/dist/spa/robots.txt"
-    },
-    {
       "source": "/:path*",
       "destination": "/api"
     }

@@ -52,6 +52,38 @@ const distPath = path.join(process.cwd(), "dist/spa");
 console.log("📁 Dist path:", distPath);
 console.log("📁 Process cwd:", process.cwd());
 
+// Middleware para garantir MIME types corretos ANTES de servir arquivos estáticos
+app.use((req, res, next) => {
+  // Apenas para arquivos estáticos (assets, etc)
+  if (req.path.startsWith('/assets/') || req.path.match(/\.(js|mjs|css|woff|woff2|ttf|eot|png|jpg|jpeg|gif|svg|webp|ico|map)$/i)) {
+    const ext = path.extname(req.path).toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      '.js': 'application/javascript; charset=utf-8',
+      '.mjs': 'application/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.html': 'text/html; charset=utf-8',
+      '.json': 'application/json; charset=utf-8',
+      '.map': 'application/json; charset=utf-8',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.svg': 'image/svg+xml',
+      '.webp': 'image/webp',
+      '.woff': 'font/woff',
+      '.woff2': 'font/woff2',
+      '.ttf': 'font/ttf',
+      '.eot': 'application/vnd.ms-fontobject',
+      '.ico': 'image/x-icon',
+    };
+    
+    if (mimeTypes[ext]) {
+      res.setHeader('Content-Type', mimeTypes[ext]);
+    }
+  }
+  next();
+});
+
 // Serve static files (JS, CSS, images, etc.) - MUST be before catch-all
 // Configure MIME types explicitly for all static files
 app.use(express.static(distPath, {
