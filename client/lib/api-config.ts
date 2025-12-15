@@ -12,16 +12,16 @@
  */
 
 // Determina a URL base da API
-// Em produção no Vercel, se não houver VITE_API_BASE_URL, usa a API local
+// Em produção no Vercel, SEMPRE usa a API local para evitar problemas de certificado SSL
 const getApiBaseUrl = () => {
-  // Se há variável de ambiente configurada, usa ela
-  if (import.meta.env.VITE_API_BASE_URL) {
-    return import.meta.env.VITE_API_BASE_URL;
-  }
-  
-  // Em produção (Vercel), usa a API local
+  // Em produção (Vercel), SEMPRE usa a API local (o backend faz proxy se necessário)
   if (import.meta.env.PROD) {
     return "/api/v1";
+  }
+  
+  // Em desenvolvimento, verifica se há variável de ambiente
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
   }
   
   // Em desenvolvimento local, usa localhost

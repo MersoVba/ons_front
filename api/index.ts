@@ -52,33 +52,46 @@ const distPath = path.join(process.cwd(), "dist/spa");
 console.log("📁 Dist path:", distPath);
 console.log("📁 Process cwd:", process.cwd());
 
-// Configure MIME types for JavaScript modules
-app.use((req, res, next) => {
-  // Set correct MIME type for .js files (ES modules)
-  if (req.path.endsWith('.js')) {
-    res.type('application/javascript');
-  }
-  // Set correct MIME type for .css files
-  if (req.path.endsWith('.css')) {
-    res.type('text/css');
-  }
-  next();
-});
-
 // Serve static files (JS, CSS, images, etc.) - MUST be before catch-all
+// Configure MIME types explicitly for all static files
 app.use(express.static(distPath, {
   maxAge: "1y",
   etag: true,
   lastModified: true,
   index: false,
-  setHeaders: (res, filePath) => {
-    // Ensure JavaScript files are served with correct MIME type
-    if (filePath.endsWith('.js')) {
-      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  setHeaders: (res, filePath, stat) => {
+    // Get file extension
+    const ext = path.extname(filePath).toLowerCase();
+    
+    // Set MIME types based on file extension
+    const mimeTypes: Record<string, string> = {
+      '.js': 'application/javascript; charset=utf-8',
+      '.mjs': 'application/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.html': 'text/html; charset=utf-8',
+      '.json': 'application/json; charset=utf-8',
+      '.map': 'application/json; charset=utf-8',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.svg': 'image/svg+xml',
+      '.webp': 'image/webp',
+      '.woff': 'font/woff',
+      '.woff2': 'font/woff2',
+      '.ttf': 'font/ttf',
+      '.eot': 'application/vnd.ms-fontobject',
+      '.ico': 'image/x-icon',
+    };
+    
+    // Set Content-Type if we have a mapping for this extension
+    if (mimeTypes[ext]) {
+      res.setHeader('Content-Type', mimeTypes[ext]);
     }
-    // Ensure CSS files are served with correct MIME type
-    if (filePath.endsWith('.css')) {
-      res.setHeader('Content-Type', 'text/css; charset=utf-8');
+    
+    // Cache control for static assets
+    if (ext === '.js' || ext === '.css' || ext === '.woff' || ext === '.woff2') {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
   }
 }));
