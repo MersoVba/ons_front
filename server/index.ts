@@ -1,9 +1,9 @@
 import express from "express";
 import cors from "cors";
-import { handleDemo } from "./routes/demo";
-import { handleUploadComprovante, uploadMiddleware } from "./routes/pagamento-boleto";
-import { handleFakeEnvio } from "./routes/pagamento-boleto-fake";
-import { handleLogin, handleValidateTotp } from "./routes/login";
+import { handleDemo } from "./routes/demo.js";
+import { handleUploadComprovante, uploadMiddleware } from "./routes/pagamento-boleto.js";
+import { handleFakeEnvio } from "./routes/pagamento-boleto-fake.js";
+import { handleLogin, handleValidateTotp } from "./routes/login.js";
 
 export function createServer() {
   console.log("🚀 Criando servidor Express...");
