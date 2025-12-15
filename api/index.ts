@@ -1,43 +1,9 @@
 import serverless from "serverless-http";
 import path from "path";
-import express from "express";
-import cors from "cors";
+import { createServer } from "../server/index.js";
 
-// Import routes directly to ensure they're bundled
-// Note: Using .js extensions for ESM compatibility in Vercel
-import { handleDemo } from "../server/routes/demo.js";
-import { handleUploadComprovante, uploadMiddleware } from "../server/routes/pagamento-boleto.js";
-import { handleFakeEnvio } from "../server/routes/pagamento-boleto-fake.js";
-import { handleLogin, handleValidateTotp } from "../server/routes/login.js";
-
-// Create Express app
-const app = express();
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Log de todas as requisições
-app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path}`);
-  next();
-});
-
-// API routes
-app.get("/api/ping", (_req, res) => {
-  res.json({ message: "Hello from Express server v2!" });
-});
-
-app.get("/api/demo", handleDemo);
-
-// Login routes
-app.post("/api/v1/login/autenticacao", handleLogin);
-app.post("/api/v1/login/validar-totp", handleValidateTotp);
-
-// Pagamento Boleto routes
-app.post("/api/pagamento-boleto/upload", uploadMiddleware, handleUploadComprovante);
-app.post("/api/pagamento-boleto/fake", handleFakeEnvio);
+// Create Express app using createServer from server/index.js
+const app = createServer();
 
 // In production, serve the built SPA files
 // Use process.cwd() for Vercel serverless environment
