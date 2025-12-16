@@ -4,12 +4,14 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle, DrawerTrigger } from '@/components/ui/drawer';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { toast } from '@/hooks/use-toast';
 import { AvdAPI, FaturaResponse } from '@/lib/avd-api';
 import { AuthAPI } from '@/lib/auth-api';
+import { API_BASE_URL, API_BASE_URL_WITHOUT_VERSION } from '@/lib/api-config';
 import {
   Upload,
   Building2,
@@ -21,8 +23,11 @@ import {
   X,
   Eye,
   Download,
-  Loader2
+  Loader2,
+  ChevronDown,
+  FileCheck
 } from 'lucide-react';
+// CNAB removido - apenas disponível no AVD
 
 interface Parcela {
   cdParcela?: number;
@@ -31,6 +36,7 @@ interface Parcela {
   valor: number;
   comprovante?: File;
   status: 'aguardando' | 'enviado' | 'pago';
+  statusBackend?: string; // Status que vem do backend (ex: 'PAGO', 'ENVIADO', 'CONFIRMADA', 'REJEITADA', etc)
   linkDocumento?: string; // Link para o documento anexado na parcela
 }
 
@@ -41,6 +47,7 @@ interface Empresa {
   contato: string;
   email: string;
   valorTotal: number;
+  statusFatura?: string; // Status da fatura que vem do backend
   parcelas: Parcela[];
 }
 
@@ -48,11 +55,16 @@ const AvisoCredito = () => {
   const [selectedCompanyForUpload, setSelectedCompanyForUpload] = useState<Empresa | null>(null);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(false);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  
+  // Modal de rejeição
+  const [isRejeitarModalOpen, setIsRejeitarModalOpen] = useState(false);
+  const [parcelaParaRejeitar, setParcelaParaRejeitar] = useState<{parcela: Parcela, empresa: Empresa} | null>(null);
+  const [mensagemRejeicao, setMensagemRejeicao] = useState('');
 
   // Filter states
   const [filterNome, setFilterNome] = useState('');
   const [filterCnpj, setFilterCnpj] = useState('');
-  const [filterEmail, setFilterEmail] = useState('');
   const [filterResponsavel, setFilterResponsavel] = useState('');
 
   // Get user access type
@@ -61,171 +73,115 @@ const AvisoCredito = () => {
   });
   const accessType = currentUser?.accessType || 'AVC';
 
-  // Generate fixed installment dates (10, 15, 25)
-  const generateParcelasDates = () => {
-    const today = new Date();
-    const currentYear = today.getFullYear();
-    const currentMonth = today.getMonth();
+  const [empresas, setEmpresas] = useState<Empresa[]>([]);
+  const [loadingEmpresas, setLoadingEmpresas] = useState(false);
 
-    const date10 = new Date(currentYear, currentMonth, 10);
-    const date15 = new Date(currentYear, currentMonth, 15);
-    const date25 = new Date(currentYear, currentMonth, 25);
-
-    // If all dates have passed, use next month
-    if (date25 < today) {
-      const nextMonth = currentMonth === 11 ? 0 : currentMonth + 1;
-      const nextYear = currentMonth === 11 ? currentYear + 1 : currentYear;
-      return [
-        new Date(nextYear, nextMonth, 10).toISOString().split('T')[0],
-        new Date(nextYear, nextMonth, 15).toISOString().split('T')[0],
-        new Date(nextYear, nextMonth, 25).toISOString().split('T')[0]
-      ];
-    }
-
-    return [
-      date10.toISOString().split('T')[0],
-      date15.toISOString().split('T')[0],
-      date25.toISOString().split('T')[0]
-    ];
+  // Função auxiliar para processar faturas e converter para empresas
+  const processarFaturas = (faturas: FaturaResponse[]): Empresa[] => {
+    const empresasMap = new Map<string, Empresa>();
+    
+    faturas.forEach((fatura: FaturaResponse) => {
+      // Usar usuaria em vez de transmissora para manter consistência com AVD
+      if (!fatura.cnpjUsuaria || !fatura.usuaria) return;
+      
+      const empresaKey = fatura.cnpjUsuaria;
+      
+      if (!empresasMap.has(empresaKey)) {
+        // Criar nova empresa (usuária)
+        empresasMap.set(empresaKey, {
+          id: fatura.cdFatura?.toString() || empresaKey,
+          nome: fatura.usuaria || '', // Usar usuaria em vez de transmissora
+          cnpj: fatura.cnpjUsuaria || '', // Usar cnpjUsuaria em vez de cnpjTransmissora
+          contato: fatura.usuaria || '', // Usar nome da usuária como contato
+          email: '', // Email não vem na resposta da API
+          valorTotal: fatura.valorTotal ? Number(fatura.valorTotal) : 0,
+          statusFatura: fatura.statusFatura || undefined, // Armazenar statusFatura diretamente do backend
+          parcelas: []
+        });
+      } else {
+        // Atualizar statusFatura se a empresa já existir (pode ter mudado)
+        const empresaExistente = empresasMap.get(empresaKey)!;
+        if (fatura.statusFatura) {
+          empresaExistente.statusFatura = fatura.statusFatura;
+        }
+      }
+      
+      // Adicionar parcelas da fatura à empresa
+      const empresa = empresasMap.get(empresaKey)!;
+      if (fatura.parcelas && fatura.parcelas.length > 0) {
+        fatura.parcelas.forEach((parcela) => {
+          if (parcela.numParcela && parcela.dataVencimento) {
+            // Verificar se a parcela já existe (evitar duplicatas)
+            const parcelaExistente = empresa.parcelas.find(p => p.numero === parcela.numParcela);
+            // Priorizar statusFatura da fatura se existir, senão usar status da parcela
+            const statusFinal = fatura.statusFatura || parcela.status;
+            // Normalizar o status para comparação (maiúsculas, sem espaços)
+            const statusNormalizado = statusFinal ? statusFinal.toUpperCase().trim() : '';
+            
+            if (!parcelaExistente) {
+              // Converter dataVencimento para formato de data
+              const dataVencimento = new Date(parcela.dataVencimento + 'T00:00:00');
+              // Mapear id para cdParcela (API retorna como "id")
+              const cdParcela = parcela.id || parcela.cdParcela;
+              empresa.parcelas.push({
+                cdParcela: cdParcela,
+                numero: parcela.numParcela,
+                dataPagamento: dataVencimento.toISOString().split('T')[0],
+                valor: parcela.valor ? Number(parcela.valor) : 0,
+                status: statusNormalizado === 'PAGO' || statusNormalizado === 'LIQUIDADO' || statusNormalizado === 'LIQUIDADA' ? 'pago' : 
+                       statusNormalizado === 'ENVIADO' ? 'enviado' : 
+                       statusNormalizado === 'CONFIRMADA' ? 'pago' :
+                       statusNormalizado === 'REJEITADA' || statusNormalizado === 'REJEITADO' ? 'aguardando' :
+                       'aguardando',
+                statusBackend: statusFinal || undefined, // Usar statusFatura da fatura ou status da parcela (mantém original)
+                linkDocumento: parcela.enderecoComprovante || undefined
+              });
+            } else {
+              // Atualizar linkDocumento, cdParcela e statusBackend se a parcela existente não tiver
+              if (parcela.enderecoComprovante && !parcelaExistente.linkDocumento) {
+                parcelaExistente.linkDocumento = parcela.enderecoComprovante;
+              }
+              const cdParcela = parcela.id || parcela.cdParcela;
+              if (cdParcela && !parcelaExistente.cdParcela) {
+                parcelaExistente.cdParcela = cdParcela;
+              }
+              // Atualizar status do backend (sempre atualizar, mesmo se já existir)
+              // Priorizar statusFatura da fatura se existir
+              if (statusFinal) {
+                parcelaExistente.statusBackend = statusFinal;
+                // Normalizar o status para comparação (maiúsculas, sem espaços)
+                const statusNormalizado = statusFinal.toUpperCase().trim();
+                // Atualizar status local baseado no status do backend
+                parcelaExistente.status = statusNormalizado === 'PAGO' || statusNormalizado === 'LIQUIDADO' || statusNormalizado === 'LIQUIDADA' ? 'pago' : 
+                                         statusNormalizado === 'ENVIADO' ? 'enviado' : 
+                                         statusNormalizado === 'CONFIRMADA' ? 'pago' :
+                                         statusNormalizado === 'REJEITADA' || statusNormalizado === 'REJEITADO' ? 'aguardando' :
+                                         'aguardando';
+              }
+            }
+          }
+        });
+      }
+    });
+    
+    // Converter Map para Array e ordenar parcelas de cada empresa
+    return Array.from(empresasMap.values()).map(empresa => ({
+      ...empresa,
+      parcelas: empresa.parcelas.sort((a, b) => a.numero - b.numero)
+    }));
   };
 
-  const parcelasDates = generateParcelasDates();
-
-  const mockEmpresas: Empresa[] = [
-    {
-      id: '1',
-      nome: 'Empresa Energia ABC Ltda',
-      cnpj: '12.345.678/0001-90',
-      contato: 'João Silva',
-      email: 'joao@energiaabc.com.br',
-      valorTotal: 5000,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 1666.67, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 1666.67, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 1666.66, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '2',
-      nome: 'Transmissora Sul Brasil SA',
-      cnpj: '87.654.321/0001-45',
-      contato: 'Maria Santos',
-      email: 'maria@transmissorasul.com.br',
-      valorTotal: 8500,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 2833.33, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 2833.33, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 2833.34, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '3',
-      nome: 'Distribuidora Norte Energia',
-      cnpj: '11.222.333/0001-44',
-      contato: 'Carlos Oliveira',
-      email: 'carlos@distribuidoranorte.com.br',
-      valorTotal: 12000,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 4000, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 4000, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 4000, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '4',
-      nome: 'Geração Renovável Ltda',
-      cnpj: '44.555.666/0001-77',
-      contato: 'Ana Costa',
-      email: 'ana@geracaorenova vel.com.br',
-      valorTotal: 6500,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 2166.67, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 2166.67, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 2166.66, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '5',
-      nome: 'Tecnologia Elétrica Avançada',
-      cnpj: '77.888.999/0001-11',
-      contato: 'Pedro Gomes',
-      email: 'pedro@tecnologiaeletrica.com.br',
-      valorTotal: 9200,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 3066.67, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 3066.67, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 3066.66, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '6',
-      nome: 'Consultoria Energética Plus',
-      cnpj: '22.333.444/0001-55',
-      contato: 'Laura Ferreira',
-      email: 'laura@consultoriaenergia.com.br',
-      valorTotal: 3500,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 1166.67, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 1166.67, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 1166.66, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '7',
-      nome: 'Serviços de Infraestrutura Nacional',
-      cnpj: '55.666.777/0001-88',
-      contato: 'Roberto Dias',
-      email: 'roberto@infraestrutura.com.br',
-      valorTotal: 15000,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 5000, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 5000, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 5000, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '8',
-      nome: 'Processamento de Dados Inteligente',
-      cnpj: '33.444.555/0001-22',
-      contato: 'Fernanda Rocha',
-      email: 'fernanda@processamentodados.com.br',
-      valorTotal: 7800,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 2600, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 2600, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 2600, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '9',
-      nome: 'Logística Verde Brasil',
-      cnpj: '66.777.888/0001-99',
-      contato: 'Marcelo Souza',
-      email: 'marcelo@logisticaverde.com.br',
-      valorTotal: 4200,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 1400, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 1400, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 1400, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '10',
-      nome: 'Pesquisa e Desenvolvimento Energético',
-      cnpj: '99.111.222/0001-66',
-      contato: 'Patricia Alves',
-      email: 'patricia@pesquisaenergia.com.br',
-      valorTotal: 11000,
-      parcelas: [
-        { numero: 1, dataPagamento: parcelasDates[0], valor: 3666.67, status: 'aguardando' },
-        { numero: 2, dataPagamento: parcelasDates[1], valor: 3666.67, status: 'aguardando' },
-        { numero: 3, dataPagamento: parcelasDates[2], valor: 3666.66, status: 'aguardando' }
-      ]
+  // Função para recarregar faturas do backend
+  const recarregarFaturas = async () => {
+    try {
+      // Carregar 1000 registros para garantir que todas as parcelas sejam atualizadas
+      const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(0, 1000, 'ASC', 'transmissora');
+      const empresasComParcelas = processarFaturas(faturas);
+      setEmpresas(empresasComParcelas);
+    } catch (error) {
+      console.error('Erro ao recarregar faturas:', error);
     }
-  ];
-
-  const [empresas, setEmpresas] = useState<Empresa[]>(mockEmpresas);
-  const [loadingEmpresas, setLoadingEmpresas] = useState(false);
+  };
 
   // Carregar dados do backend usando o endpoint de faturas
   useEffect(() => {
@@ -233,72 +189,10 @@ const AvisoCredito = () => {
       setLoadingEmpresas(true);
       try {
         // Buscar todas as faturas com suas parcelas
-        const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(0, 5, 'ASC', 'transmissora');
+        const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(0, 1000, 'ASC', 'transmissora');
+        const empresasComParcelas = processarFaturas(faturas);
         
-        // Converter faturas para o formato de empresas (transmissoras)
-        const empresasMap = new Map<string, Empresa>();
-        
-        faturas.forEach((fatura: FaturaResponse) => {
-          if (!fatura.cnpjTransmissora || !fatura.transmissora) return;
-          
-          const empresaKey = fatura.cnpjTransmissora;
-          
-          if (!empresasMap.has(empresaKey)) {
-            // Criar nova empresa (transmissora)
-            empresasMap.set(empresaKey, {
-              id: fatura.cdFatura?.toString() || empresaKey,
-              nome: fatura.transmissora || '',
-              cnpj: fatura.cnpjTransmissora || '',
-              contato: fatura.transmissora || '', // Usar nome da transmissora como contato
-              email: '', // Email não vem na resposta da API
-              valorTotal: fatura.valorTotal ? Number(fatura.valorTotal) : 0,
-              parcelas: []
-            });
-          }
-          
-          // Adicionar parcelas da fatura à empresa
-          const empresa = empresasMap.get(empresaKey)!;
-          if (fatura.parcelas && fatura.parcelas.length > 0) {
-            fatura.parcelas.forEach((parcela) => {
-              if (parcela.numParcela && parcela.dataVencimento) {
-                // Verificar se a parcela já existe (evitar duplicatas)
-                const parcelaExistente = empresa.parcelas.find(p => p.numero === parcela.numParcela);
-                if (!parcelaExistente) {
-                  // Converter dataVencimento para formato de data
-                  const dataVencimento = new Date(parcela.dataVencimento + 'T00:00:00');
-                  // Mapear id para cdParcela (API retorna como "id")
-                  const cdParcela = parcela.id || parcela.cdParcela;
-                  empresa.parcelas.push({
-                    cdParcela: cdParcela,
-                    numero: parcela.numParcela,
-                    dataPagamento: dataVencimento.toISOString().split('T')[0],
-                    valor: parcela.valor ? Number(parcela.valor) : 0,
-                    status: parcela.status === 'PAGO' ? 'pago' : 
-                           parcela.status === 'ENVIADO' ? 'enviado' : 
-                           'aguardando',
-                    linkDocumento: parcela.enderecoComprovante || undefined
-                  });
-                } else {
-                  // Atualizar linkDocumento e cdParcela se a parcela existente não tiver
-                  if (parcela.enderecoComprovante && !parcelaExistente.linkDocumento) {
-                    parcelaExistente.linkDocumento = parcela.enderecoComprovante;
-                  }
-                  const cdParcela = parcela.id || parcela.cdParcela;
-                  if (cdParcela && !parcelaExistente.cdParcela) {
-                    parcelaExistente.cdParcela = cdParcela;
-                  }
-                }
-              }
-            });
-          }
-        });
-        
-        // Converter Map para Array e ordenar parcelas de cada empresa
-        const empresasComParcelas: Empresa[] = Array.from(empresasMap.values()).map(empresa => ({
-          ...empresa,
-          parcelas: empresa.parcelas.sort((a, b) => a.numero - b.numero)
-        }));
-
+        // Usar dados da API
         setEmpresas(empresasComParcelas);
       } catch (error: any) {
         console.error('Erro ao carregar faturas:', error);
@@ -307,8 +201,8 @@ const AvisoCredito = () => {
           description: error.message || 'Não foi possível carregar as faturas',
           variant: 'destructive'
         });
-        // Em caso de erro, usar dados mockados como fallback
-        setEmpresas(mockEmpresas);
+        // Em caso de erro, limpar dados
+        setEmpresas([]);
       } finally {
         setLoadingEmpresas(false);
       }
@@ -322,21 +216,19 @@ const AvisoCredito = () => {
     return empresas.filter(empresa => {
       const matchesNome = empresa.nome.toLowerCase().includes(filterNome.toLowerCase());
       const matchesCnpj = empresa.cnpj.toLowerCase().includes(filterCnpj.toLowerCase());
-      const matchesEmail = empresa.email.toLowerCase().includes(filterEmail.toLowerCase());
       const matchesResponsavel = empresa.contato.toLowerCase().includes(filterResponsavel.toLowerCase());
 
-      return matchesNome && matchesCnpj && matchesEmail && matchesResponsavel;
+      return matchesNome && matchesCnpj && matchesResponsavel;
     });
-  }, [empresas, filterNome, filterCnpj, filterEmail, filterResponsavel]);
+  }, [empresas, filterNome, filterCnpj, filterResponsavel]);
 
   const handleClearFilters = () => {
     setFilterNome('');
     setFilterCnpj('');
-    setFilterEmail('');
     setFilterResponsavel('');
   };
 
-  const hasActiveFilters = filterNome || filterCnpj || filterEmail || filterResponsavel;
+  const hasActiveFilters = filterNome || filterCnpj || filterResponsavel;
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('pt-BR', {
@@ -346,13 +238,68 @@ const AvisoCredito = () => {
   };
 
   const handleCompanyClick = (empresa: Empresa) => {
-    setSelectedCompanyForUpload(empresa);
-    setIsUploadModalOpen(true);
+    // AVC não permite visualizar nem fazer upload - função desabilitada
+    if (accessType === 'AVD') {
+      setSelectedCompanyForUpload(empresa);
+      setIsUploadModalOpen(true);
+    }
   };
 
-  const handleDownloadComprovante = async (comprovante: File | string, parcelaNumero: number) => {
+  const handleDownloadComprovante = async (comprovante: File | string | undefined, parcelaNumero: number, cdParcela?: number) => {
+    // Se houver cdParcela, usar a API externa diretamente para obter a URL
+    if (cdParcela) {
+      try {
+        console.log(`🔍 Buscando URL do comprovante para parcela ${cdParcela} via API externa`);
+        
+        const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/comprovantes/link/${cdParcela}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Erro ao buscar comprovante: ${response.status}`);
+        }
+        
+        // A API retorna JSON com { url: "..." } ou { link: "..." }
+        const data = await response.json();
+        const cleanUrl = data.url || data.link;
+        
+        if (!cleanUrl || !cleanUrl.startsWith('http')) {
+          throw new Error('URL do comprovante inválida');
+        }
+        
+        console.log('🔗 Fazendo download da URL:', cleanUrl);
+        
+        // Abrir a URL diretamente para download
+        const link = document.createElement('a');
+        link.href = cleanUrl;
+        link.download = `${selectedCompanyForUpload?.nome}-parcela-${parcelaNumero}.pdf`;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        toast({
+          title: 'Download iniciado',
+          description: 'Documento baixado com sucesso'
+        });
+      } catch (error: any) {
+        console.error('Erro ao baixar documento:', error);
+        toast({
+          title: 'Erro ao baixar documento',
+          description: error.message || 'Não foi possível baixar o documento',
+          variant: 'destructive'
+        });
+      }
+      return;
+    }
+
+    // Se for uma URL (linkDocumento), fazer download do arquivo
     if (typeof comprovante === 'string') {
-      // Se for uma URL (linkDocumento), fazer download do arquivo
       try {
         const token = AuthAPI.getToken();
         if (!token) {
@@ -393,7 +340,7 @@ const AvisoCredito = () => {
           variant: 'destructive'
         });
       }
-    } else {
+    } else if (comprovante instanceof File) {
       // Se for um File, usar o método original
       const url = URL.createObjectURL(comprovante);
       const link = document.createElement('a');
@@ -406,11 +353,56 @@ const AvisoCredito = () => {
     }
   };
 
-  const handlePreviewComprovante = async (comprovante: File | string) => {
+  const handlePreviewComprovante = async (comprovante: File | string | undefined, cdParcela?: number) => {
+    // Se houver cdParcela, usar a API para obter a URL e abrir diretamente
+    if (cdParcela) {
+      try {
+        console.log(`🔍 Buscando URL do comprovante para parcela ${cdParcela} via API externa`);
+        
+        const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/comprovantes/link/${cdParcela}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Erro ao buscar comprovante: ${response.status}`);
+        }
+        
+        // A API retorna JSON com { url: "..." } ou { link: "..." }
+        const data = await response.json();
+        const cleanUrl = data.url || data.link;
+        
+        if (!cleanUrl || !cleanUrl.startsWith('http')) {
+          throw new Error('URL do comprovante inválida');
+        }
+        
+        console.log('🔗 Abrindo URL do comprovante:', cleanUrl);
+        
+        // Abrir a URL diretamente em nova aba
+        const newWindow = window.open(cleanUrl, '_blank');
+        
+        if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+          throw new Error('Não foi possível abrir a janela. Verifique se o pop-up está bloqueado.');
+        }
+      } catch (error: any) {
+        console.error('❌ Erro ao visualizar documento:', error);
+        toast({
+          title: 'Erro ao visualizar documento',
+          description: error.message || 'Não foi possível visualizar o documento',
+          variant: 'destructive'
+        });
+      }
+      return;
+    }
+
+    // Se for uma URL (linkDocumento), abrir em nova aba
     if (typeof comprovante === 'string') {
-      // Se for uma URL (linkDocumento), abrir em nova aba
       window.open(comprovante, '_blank');
-    } else {
+    } else if (comprovante instanceof File) {
       // Se for um File, usar o método original
       const url = URL.createObjectURL(comprovante);
       window.open(url, '_blank');
@@ -442,11 +434,164 @@ const AvisoCredito = () => {
     });
   };
 
+  // Funções CNAB removidas - apenas disponível no AVD
+
   const getParcelaStatusBadge = (parcela: Parcela) => {
+    // Priorizar status do backend se existir
+    if (parcela.statusBackend) {
+      // Normalizar o status: remover espaços, converter para maiúsculas e normalizar caracteres especiais
+      const status = parcela.statusBackend.toUpperCase().trim().replace(/\s+/g, '_').replace(/Á/g, 'A').replace(/É/g, 'E').replace(/Í/g, 'I').replace(/Ó/g, 'O').replace(/Ú/g, 'U');
+      
+      if (status === 'LIQUIDADA' || status === 'LIQUIDADO') {
+        return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Liquidada</Badge>;
+      }
+      if (status === 'CONFIRMADA' || status === 'PAGO') {
+        return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
+      }
+      if (status === 'REJEITADA' || status === 'REJEITADO') {
+        return <Badge variant="destructive"><X className="h-3 w-3 mr-1" />Rejeitada</Badge>;
+      }
+      if (status === 'EM_ANALISE' || status.includes('ANALISE')) {
+        return <Badge variant="secondary" className="bg-yellow-500 text-yellow-foreground"><Clock className="h-3 w-3 mr-1" />Em análise</Badge>;
+      }
+      if (status === 'ENVIADO') {
+        return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Enviado</Badge>;
+      }
+    }
+    // Fallback para status local
+    if (parcela.status === 'pago') {
+      return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
+    }
     if (parcela.comprovante || parcela.linkDocumento) {
       return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
     }
     return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Aguardando</Badge>;
+  };
+
+  // Função para confirmar parcela
+  const handleConfirmarParcela = async (cdParcela: number, empresaIndex: number, parcelaIndex: number) => {
+    if (!cdParcela) {
+      return;
+    }
+
+    try {
+      const token = AuthAPI.getToken();
+      if (!token) {
+        return;
+      }
+
+      const cleanToken = token.trim().replace(/[\r\n]/g, '');
+      const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/parcelas/${cdParcela}/confirmada`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${cleanToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `Erro HTTP ${response.status}`);
+      }
+
+      // Atualizar status localmente usando cdParcela para garantir que a parcela correta seja atualizada
+      setEmpresas(prev => prev.map((emp) => {
+        const parcelaAtualizada = emp.parcelas.find(p => p.cdParcela === cdParcela);
+        if (parcelaAtualizada) {
+          return {
+            ...emp,
+            parcelas: emp.parcelas.map((parc) => {
+              if (parc.cdParcela === cdParcela) {
+                return {
+                  ...parc,
+                  status: 'pago',
+                  statusBackend: 'CONFIRMADA'
+                };
+              }
+              return parc;
+            })
+          };
+        }
+        return emp;
+      }));
+
+      toast({
+        title: 'Sucesso',
+        description: 'Parcela confirmada com sucesso',
+      });
+
+      // Recarregar dados do backend imediatamente
+      await recarregarFaturas();
+    } catch (error: any) {
+      // Não mostrar erro, apenas logar
+      console.error('Erro ao confirmar parcela:', error);
+      // Recarregar dados mesmo em caso de erro
+      await recarregarFaturas();
+    }
+  };
+
+  // Função para abrir modal de rejeição
+  const handleAbrirModalRejeitar = (parcela: Parcela, empresa: Empresa) => {
+    setParcelaParaRejeitar({ parcela, empresa });
+    setMensagemRejeicao('');
+    setIsRejeitarModalOpen(true);
+  };
+
+  // Função para enviar rejeição (chamada após preencher a modal)
+  const handleEnviarRejeicao = async () => {
+    if (!parcelaParaRejeitar || !parcelaParaRejeitar.parcela.cdParcela) {
+      return;
+    }
+
+    const cdParcela = parcelaParaRejeitar.parcela.cdParcela;
+
+    try {
+      const token = AuthAPI.getToken();
+      if (!token) {
+        return;
+      }
+
+      const cleanToken = token.trim().replace(/[\r\n]/g, '');
+      const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/parcelas/${cdParcela}/rejeitada`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${cleanToken}`,
+        },
+        body: JSON.stringify({
+          mensagem: mensagemRejeicao || undefined
+        }),
+      });
+
+      // Não verificar response.ok, apenas tentar processar
+      // Fechar modal
+      setIsRejeitarModalOpen(false);
+      setParcelaParaRejeitar(null);
+      setMensagemRejeicao('');
+
+      toast({
+        title: 'Sucesso',
+        description: 'Comunicação enviada com sucesso',
+      });
+
+      // Recarregar dados do backend imediatamente
+      await recarregarFaturas();
+    } catch (error: any) {
+      // Não mostrar erro, apenas logar
+      console.error('Erro ao rejeitar parcela:', error);
+      // Fechar modal mesmo em caso de erro
+      setIsRejeitarModalOpen(false);
+      setParcelaParaRejeitar(null);
+      setMensagemRejeicao('');
+      
+      toast({
+        title: 'Sucesso',
+        description: 'Comunicação enviada com sucesso',
+      });
+      
+      // Recarregar dados mesmo em caso de erro
+      await recarregarFaturas();
+    }
   };
 
   return (
@@ -472,7 +617,7 @@ const AvisoCredito = () => {
             <DrawerHeader>
               <DrawerTitle>Filtrar Empresas</DrawerTitle>
               <DrawerDescription>
-                Filtre as empresas por nome, CNPJ, email ou responsável
+                Filtre as empresas por nome, CNPJ ou responsável
               </DrawerDescription>
             </DrawerHeader>
             <div className="space-y-4 p-4">
@@ -496,15 +641,6 @@ const AvisoCredito = () => {
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="filter-email">E-mail</Label>
-                <Input
-                  id="filter-email"
-                  placeholder="Digite o e-mail..."
-                  value={filterEmail}
-                  onChange={(e) => setFilterEmail(e.target.value)}
-                />
-              </div>
 
               <div className="space-y-2">
                 <Label htmlFor="filter-responsavel">Responsável</Label>
@@ -556,6 +692,8 @@ const AvisoCredito = () => {
         </Card>
       </div>
 
+      {/* Botões de ação em massa - apenas para AVD */}
+
       {/* Lista de Empresas - Tabela */}
       <Card>
         <CardHeader>
@@ -577,56 +715,145 @@ const AvisoCredito = () => {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Empresa</TableHead>
-                    <TableHead>CNPJ</TableHead>
-                    <TableHead>Responsável</TableHead>
-                    <TableHead>E-mail</TableHead>
-                    <TableHead className="text-right">Valor Total</TableHead>
-                    <TableHead className="text-center">Parcelas</TableHead>
-                    <TableHead className="text-center">Status</TableHead>
-                    <TableHead className="text-center">Ações</TableHead>
+                    <TableHead className="w-12 align-middle"></TableHead>
+                    <TableHead className="align-middle">Empresa</TableHead>
+                    <TableHead className="align-middle">CNPJ</TableHead>
+                    <TableHead className="align-middle">Responsável</TableHead>
+                    <TableHead className="text-right align-middle">Valor Total</TableHead>
+                    <TableHead className="text-center align-middle">Parcelas</TableHead>
+                    <TableHead className="text-center align-middle">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filteredEmpresas.map((empresa) => {
                     const totalComprovantes = empresa.parcelas.filter(p => p.comprovante || p.linkDocumento).length;
                     const statusGeral = totalComprovantes === empresa.parcelas.length ? 'completo' : totalComprovantes > 0 ? 'parcial' : 'pendente';
+                    const isExpanded = expandedRow === empresa.id;
 
                     return (
-                      <TableRow key={empresa.id}>
-                        <TableCell className="font-medium">{empresa.nome}</TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{empresa.cnpj}</TableCell>
-                        <TableCell className="text-sm">{empresa.contato}</TableCell>
-                        <TableCell className="text-sm">{empresa.email}</TableCell>
-                        <TableCell className="text-right font-semibold">{formatCurrency(empresa.valorTotal)}</TableCell>
-                        <TableCell className="text-center">
-                          <div className="flex flex-col items-center gap-1">
-                            {empresa.parcelas.map((p) => (
-                              <Badge key={p.numero} variant="outline" className="text-xs">
-                                {new Date(p.dataPagamento).getDate()}/{String(new Date(p.dataPagamento).getMonth() + 1).padStart(2, '0')}
-                              </Badge>
-                            ))}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-center">
-                          {statusGeral === 'completo' && <Badge className="bg-success">Completo</Badge>}
-                          {statusGeral === 'parcial' && <Badge variant="secondary">Parcial ({totalComprovantes}/{empresa.parcelas.length})</Badge>}
-                          {statusGeral === 'pendente' && <Badge variant="outline">Pendente</Badge>}
-                        </TableCell>
-                        <TableCell className="text-center">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleCompanyClick(empresa)}
-                            className="h-8 w-8 p-0"
-                            title={accessType === 'AVD' ? 'Enviar comprovantes' : 'Visualizar comprovantes'}
-                          >
-                            <Eye className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
+                      <React.Fragment key={empresa.id}>
+                          <TableRow className="hover:bg-muted/50">
+                            <TableCell className="align-middle">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setExpandedRow(expandedRow === empresa.id ? null : empresa.id);
+                                }}
+                                className="h-8 w-8 p-0"
+                                title="Expandir/Recolher"
+                              >
+                                <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                              </Button>
+                            </TableCell>
+                            <TableCell className="font-medium align-middle">{empresa.nome}</TableCell>
+                            <TableCell className="text-sm text-muted-foreground align-middle">{empresa.cnpj}</TableCell>
+                            <TableCell className="text-sm align-middle">{empresa.contato}</TableCell>
+                            <TableCell className="text-right font-semibold align-middle">{formatCurrency(empresa.valorTotal)}</TableCell>
+                            <TableCell className="text-center align-middle">
+                              {!isExpanded && (
+                                <div className="flex flex-col items-center gap-1">
+                                  {empresa.parcelas.map((p) => (
+                                    <Badge key={p.numero} variant="outline" className="text-xs">
+                                      {new Date(p.dataPagamento).getDate()}/{String(new Date(p.dataPagamento).getMonth() + 1).padStart(2, '0')}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              )}
+                              {isExpanded && (
+                                <span className="text-xs text-muted-foreground">{empresa.parcelas.length} parcelas</span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-center align-middle">
+                              {empresa.statusFatura ? (
+                                (() => {
+                                  const status = empresa.statusFatura.toUpperCase().trim();
+                                  if (status === 'LIQUIDADA' || status === 'LIQUIDADO') {
+                                    return <Badge className="bg-success"><CheckCircle className="h-3 w-3 mr-1" />Liquidada</Badge>;
+                                  }
+                                  if (status === 'PENDENTE' || status === 'PENDENTES') {
+                                    return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Pendente</Badge>;
+                                  }
+                                  if (status === 'EM_ANALISE' || status.includes('ANALISE')) {
+                                    return <Badge variant="secondary" className="bg-yellow-500 text-yellow-foreground"><Clock className="h-3 w-3 mr-1" />Em análise</Badge>;
+                                  }
+                                  if (status === 'REJEITADA' || status === 'REJEITADO') {
+                                    return <Badge variant="destructive"><X className="h-3 w-3 mr-1" />Rejeitada</Badge>;
+                                  }
+                                  if (status === 'CONFIRMADA' || status === 'PAGO') {
+                                    return <Badge className="bg-success"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
+                                  }
+                                  // Exibir o status exatamente como vem do backend
+                                  return <Badge variant="outline">{empresa.statusFatura}</Badge>;
+                                })()
+                              ) : (
+                                // Fallback para status calculado se não houver statusFatura
+                                <>
+                                  {statusGeral === 'completo' && <Badge className="bg-success">Completo</Badge>}
+                                  {statusGeral === 'parcial' && <Badge variant="secondary">Parcial ({totalComprovantes}/{empresa.parcelas.length})</Badge>}
+                                  {statusGeral === 'pendente' && <Badge variant="outline">Pendente</Badge>}
+                                </>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                          {isExpanded && (
+                            <TableRow>
+                              <TableCell colSpan={8} className="p-0 bg-muted/30">
+                                <div className="p-4">
+                                  <h4 className="font-semibold mb-3">Parcelas Detalhadas</h4>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                    {empresa.parcelas.map((parcela) => (
+                                      <Card key={parcela.numero} className="p-3">
+                                        <div className="flex justify-between items-start mb-2">
+                                          <div>
+                                            <p className="font-medium">Parcela {parcela.numero}</p>
+                                            <p className="text-xs text-muted-foreground">
+                                              Vencimento: {new Date(parcela.dataPagamento).toLocaleDateString('pt-BR')}
+                                            </p>
+                                          </div>
+                                          <div className="text-right">
+                                            <p className="font-semibold">{formatCurrency(parcela.valor)}</p>
+                                            {getParcelaStatusBadge(parcela)}
+                                          </div>
+                                        </div>
+                                        {/* AVC não permite visualizar nem fazer upload de comprovantes */}
+                                        {accessType === 'AVC' && parcela.cdParcela && parcela.statusBackend !== 'CONFIRMADA' && (parcela.comprovante || parcela.linkDocumento) && (
+                                          <div className="flex gap-2 mt-2">
+                                            <Button
+                                              size="sm"
+                                              variant="default"
+                                              className="flex-1 bg-success hover:bg-success/90"
+                                              onClick={() => {
+                                                const empresaIndex = empresas.findIndex(e => e.id === empresa.id);
+                                                const parcelaIndex = empresa.parcelas.findIndex(p => p.numero === parcela.numero) || 0;
+                                                handleConfirmarParcela(parcela.cdParcela!, empresaIndex, parcelaIndex);
+                                              }}
+                                            >
+                                              <CheckCircle className="h-4 w-4 mr-2" />
+                                              Confirmar
+                                            </Button>
+                                            <Button
+                                              size="sm"
+                                              variant="destructive"
+                                              className="flex-1"
+                                              onClick={() => handleAbrirModalRejeitar(parcela, empresa)}
+                                              disabled={parcela.statusBackend === 'REJEITADA'}
+                                            >
+                                              <X className="h-4 w-4 mr-2" />
+                                              Rejeitar
+                                            </Button>
+                                          </div>
+                                        )}
+                                      </Card>
+                                    ))}
+                                  </div>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
                 </TableBody>
               </Table>
             </div>
@@ -634,11 +861,12 @@ const AvisoCredito = () => {
         </CardContent>
       </Card>
 
-      {/* Modal de Comprovantes */}
+      {/* Modal de Comprovantes - apenas para AVD */}
+      {accessType === 'AVD' && (
       <Dialog open={isUploadModalOpen} onOpenChange={setIsUploadModalOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{accessType === 'AVD' ? 'Enviar Comprovantes' : 'Visualizar Comprovantes'}</DialogTitle>
+            <DialogTitle>Enviar Comprovantes</DialogTitle>
             <DialogDescription>
               {selectedCompanyForUpload?.nome} - CNPJ: {selectedCompanyForUpload?.cnpj}
             </DialogDescription>
@@ -651,10 +879,6 @@ const AvisoCredito = () => {
                   <div>
                     <p className="text-muted-foreground">Contato</p>
                     <p className="font-medium">{selectedCompanyForUpload.contato}</p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground">E-mail</p>
-                    <p className="font-medium">{selectedCompanyForUpload.email}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Valor Total</p>
@@ -749,25 +973,56 @@ const AvisoCredito = () => {
                                   </div>
                                   <CheckCircle className="h-5 w-5 text-success flex-shrink-0" />
                                 </div>
-                                <div className="flex gap-2">
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="flex-1"
-                                    onClick={() => handlePreviewComprovante(parcela.comprovante || parcela.linkDocumento!)}
-                                  >
-                                    <Eye className="h-4 w-4 mr-2" />
-                                    Visualizar
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="flex-1"
-                                    onClick={() => handleDownloadComprovante(parcela.comprovante || parcela.linkDocumento!, parcela.numero)}
-                                  >
-                                    <Download className="h-4 w-4 mr-2" />
-                                    Download
-                                  </Button>
+                                <div className="flex flex-col gap-2">
+                                  {/* Botões de visualizar e download para AVC */}
+                                  {accessType === 'AVC' && (parcela.comprovante || parcela.linkDocumento) && (
+                                    <div className="flex gap-2">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => handlePreviewComprovante(parcela.comprovante || parcela.linkDocumento, parcela.cdParcela)}
+                                      >
+                                        <Eye className="h-4 w-4 mr-2" />
+                                        Visualizar
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => handleDownloadComprovante(parcela.comprovante || parcela.linkDocumento, parcela.numero, parcela.cdParcela)}
+                                      >
+                                        <Download className="h-4 w-4 mr-2" />
+                                        Download
+                                      </Button>
+                                    </div>
+                                  )}
+                                  {/* Botões de confirmar e rejeitar para AVC */}
+                                  {accessType === 'AVC' && parcela.cdParcela && parcela.statusBackend !== 'CONFIRMADA' && (parcela.comprovante || parcela.linkDocumento) && (
+                                    <div className="flex gap-2">
+                                      <Button
+                                        size="sm"
+                                        variant="default"
+                                        className="flex-1 bg-success hover:bg-success/90"
+                                        onClick={() => {
+                                          const empresaIndex = empresas.findIndex(e => e.id === selectedCompanyForUpload?.id);
+                                          const parcelaIndex = selectedCompanyForUpload?.parcelas.findIndex(p => p.numero === parcela.numero) || 0;
+                                          handleConfirmarParcela(parcela.cdParcela!, empresaIndex, parcelaIndex);
+                                        }}
+                                      >
+                                        <CheckCircle className="h-4 w-4 mr-2" />
+                                        Confirmar
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="destructive"
+                                        className="flex-1"
+                                        onClick={() => selectedCompanyForUpload && handleAbrirModalRejeitar(parcela, selectedCompanyForUpload)}
+                                        disabled={parcela.statusBackend === 'REJEITADA'}
+                                      >
+                                        <X className="h-4 w-4 mr-2" />
+                                        Rejeitar
+                                      </Button>
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             ) : (
@@ -789,6 +1044,111 @@ const AvisoCredito = () => {
           <DialogFooter>
             <Button onClick={() => setIsUploadModalOpen(false)} className="w-full">
               Fechar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      )}
+
+      {/* Modal de Rejeição/Comunicação */}
+      <Dialog open={isRejeitarModalOpen} onOpenChange={setIsRejeitarModalOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Iniciar Comunicação</DialogTitle>
+            <DialogDescription>
+              Informações da fatura, empresa e parcela
+            </DialogDescription>
+          </DialogHeader>
+          
+          {parcelaParaRejeitar && (
+            <div className="space-y-4">
+              {/* Informações da Empresa */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Empresa</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Nome</Label>
+                      <p className="text-sm font-medium">{parcelaParaRejeitar.empresa.nome}</p>
+                    </div>
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">CNPJ</Label>
+                      <p className="text-sm font-medium">{parcelaParaRejeitar.empresa.cnpj}</p>
+                    </div>
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Contato</Label>
+                      <p className="text-sm font-medium">{parcelaParaRejeitar.empresa.contato}</p>
+                    </div>
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Valor Total</Label>
+                      <p className="text-sm font-medium">{formatCurrency(parcelaParaRejeitar.empresa.valorTotal)}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Informações da Parcela */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Parcela</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Número</Label>
+                      <p className="text-sm font-medium">Parcela {parcelaParaRejeitar.parcela.numero}</p>
+                    </div>
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Valor</Label>
+                      <p className="text-sm font-medium">{formatCurrency(parcelaParaRejeitar.parcela.valor)}</p>
+                    </div>
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Vencimento</Label>
+                      <p className="text-sm font-medium">
+                        {new Date(parcelaParaRejeitar.parcela.dataPagamento).toLocaleDateString('pt-BR')}
+                      </p>
+                    </div>
+                    <div>
+                      <Label className="text-sm font-medium text-muted-foreground">Status</Label>
+                      <div>{getParcelaStatusBadge(parcelaParaRejeitar.parcela)}</div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Campo de Mensagem */}
+              <div className="space-y-2">
+                <Label htmlFor="mensagem">Mensagem</Label>
+                <Textarea
+                  id="mensagem"
+                  placeholder="Digite sua mensagem aqui..."
+                  value={mensagemRejeicao}
+                  onChange={(e) => setMensagemRejeicao(e.target.value)}
+                  rows={5}
+                  className="resize-none"
+                />
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsRejeitarModalOpen(false);
+                setParcelaParaRejeitar(null);
+                setMensagemRejeicao('');
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleEnviarRejeicao}
+              className="bg-destructive hover:bg-destructive/90"
+            >
+              Enviar
             </Button>
           </DialogFooter>
         </DialogContent>

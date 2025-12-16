@@ -9,6 +9,8 @@ import { handleDemo } from "./routes/demo.js";
 import { handleUploadComprovante, uploadMiddleware } from "./routes/pagamento-boleto.js";
 import { handleFakeEnvio } from "./routes/pagamento-boleto-fake.js";
 import { handleLogin, handleValidateTotp } from "./routes/login.js";
+import { handleGetComprovante, handleAlterarComprovante, uploadMiddleware as comprovanteUploadMiddleware } from "./routes/comprovantes.js";
+import { handleProcessarCNAB, uploadMiddleware as cnabUploadMiddleware } from "./routes/cnab.js";
 
 // Create Express app
 const app = express();
@@ -36,6 +38,13 @@ app.post("/api/v1/login/validar-totp", handleValidateTotp);
 
 app.post("/api/pagamento-boleto/upload", uploadMiddleware, handleUploadComprovante);
 app.post("/api/pagamento-boleto/fake", handleFakeEnvio);
+
+// Endpoint removido - frontend chama API externa diretamente
+// app.get("/api/comprovantes/link/:id", handleGetComprovante);
+app.put("/api/comprovantes/alterar", comprovanteUploadMiddleware, handleAlterarComprovante);
+
+// Rota para processar arquivo CNAB
+app.post("/api/cnab/processar", cnabUploadMiddleware, handleProcessarCNAB);
 
 // Serve static files from dist/spa
 // In Vercel, process.cwd() points to /var/task

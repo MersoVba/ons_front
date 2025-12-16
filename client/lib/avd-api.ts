@@ -29,6 +29,7 @@ export interface FaturaResponse {
   transmissora?: string;
   tributos?: number;
   valorTotal?: number;
+  valorDivergente?: number; // Valor divergente (inadimplência) da fatura
   parcelas?: ParcelaResponse[];
 }
 

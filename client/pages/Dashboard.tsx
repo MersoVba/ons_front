@@ -15,7 +15,8 @@ import {
   FileText,
   ChevronDown
 } from 'lucide-react';
-import React from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { AvdAPI, FaturaResponse } from '@/lib/avd-api';
 // Lightweight SVG line chart component (avoids external chart libs to prevent hook conflicts)
 const LineChartSVG: React.FC<{data: {month: string; paid: number}[]; height?: number}> = ({ data, height = 240 }) => {
   const w = 760;
@@ -252,32 +253,6 @@ const monthlyAvgDelayByYear: Record<number, {month: string; days: number}[]> = {
 };
 
 const Dashboard = () => {
-  // Mock data - em uma aplicação real viria de uma API
-  const dashboardData = {
-    financialMetrics: {
-      totalReceivable: 15750000.50,
-      totalReceived: 12980000.75,
-      totalOverdue: 2770000.25,
-      monthlyCollection: 2150000.00
-    },
-    defaultMetrics: {
-      totalDefaulters: 23,
-      defaultAmount: 2770000.25,
-      defaultPercentage: 17.6
-    },
-    monthlyMetrics: {
-      currentMonth: 'Dezembro 2024',
-      received: 2150000.00,
-      target: 2500000.00,
-      percentage: 86
-    },
-    recentActivities: [
-      { id: 1, type: 'payment', description: 'Pagamento recebido - Concessionária ABC', amount: 150000, time: '2 horas atrás' },
-      { id: 2, type: 'boleto', description: 'Boleto gerado - Usuário XYZ', amount: 85000, time: '3 horas atrás' },
-      { id: 3, type: 'nfe', description: 'NFe emitida - Concessionária DEF', amount: 220000, time: '5 horas atr��s' },
-      { id: 4, type: 'overdue', description: 'Débito em atraso - Usuário GHI', amount: 95000, time: '1 dia atrás' }
-    ]
-  };
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('pt-BR', {
@@ -290,7 +265,80 @@ const Dashboard = () => {
     try { const u = JSON.parse(localStorage.getItem('authUser') || 'null'); return u?.accessType || ''; } catch (e) { return ''; }
   };
 
-  const isAVD = getAuthAccess() === 'AVD';
+  const accessType = getAuthAccess();
+  const isAVD = accessType === 'AVD';
+  const isAVC = accessType === 'AVC';
+
+  const [loading] = useState(false);
+
+  // Dados mock para dashboard
+  const financialMetrics = useMemo(() => {
+    if (isAVC) {
+      // Dados mock para AVC
+      return {
+        totalReceivable: 90000.00, // Total a receber
+        totalReceived: 47000.00, // Recebido
+        totalOverdue: 43000.00, // Em atraso
+        monthlyCollection: 47000.00, // Recebido no mês
+        totalDefaulters: 0,
+        defaultAmount: 43000.00,
+        defaultPercentage: 47.8
+      };
+    } else if (isAVD) {
+      // Dados mock para AVD
+      return {
+        totalReceivable: 90000.00, // Total a pagar
+        totalReceived: 47000.00, // Pago
+        totalOverdue: 43000.00, // A pagar (não em atraso, mas pendente)
+        monthlyCollection: 47000.00, // Pago no mês
+        totalDefaulters: 0,
+        defaultAmount: 43000.00,
+        defaultPercentage: 47.8
+      };
+    }
+    
+    // Valores padrão para outros perfis
+    return {
+      totalReceivable: 0,
+      totalReceived: 0,
+      totalOverdue: 0,
+      monthlyCollection: 0,
+      totalDefaulters: 0,
+      defaultAmount: 0,
+      defaultPercentage: 0
+    };
+  }, [isAVC, isAVD]);
+
+  // Métricas mensais
+  const monthlyMetrics = useMemo(() => {
+    const hoje = new Date();
+    const meses = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 
+                   'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+    const currentMonth = `${meses[hoje.getMonth()]} ${hoje.getFullYear()}`;
+    
+    // Meta mensal: 100% do total a receber/pagar
+    const target = financialMetrics.totalReceivable;
+    const percentage = target > 0 
+      ? Math.round((financialMetrics.totalReceived / target) * 100) 
+      : 0;
+
+    return {
+      currentMonth,
+      received: financialMetrics.totalReceived,
+      target,
+      percentage: Math.min(percentage, 100)
+    };
+  }, [financialMetrics]);
+
+  const dashboardData = {
+    financialMetrics,
+    defaultMetrics: {
+      totalDefaulters: financialMetrics.totalDefaulters,
+      defaultAmount: financialMetrics.defaultAmount,
+      defaultPercentage: financialMetrics.defaultPercentage
+    },
+    monthlyMetrics
+  };
 
   // Mock list of producers to pay (boletos/notas)
   const producersToPay = [
@@ -372,13 +420,31 @@ const Dashboard = () => {
     return arr.map(m => ({ month: m.month + '/' + String(selected.year).slice(-2), value: m.days }));
   }, [selected, years]);
 
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-center h-64">
+          <div className="text-muted-foreground">Carregando dados...</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Dashboard</h1>
-          <p className="text-muted-foreground">Controle financeiro de transmissão de energia elétrica</p>
+          <h1 className="text-3xl font-bold text-foreground">
+            {isAVC ? 'Dashboard Aviso de Crédito' : isAVD ? 'Dashboard Aviso de Débito' : 'Dashboard'}
+          </h1>
+          <p className="text-muted-foreground">
+            {isAVC 
+              ? 'Controle financeiro de créditos e recebimentos' 
+              : isAVD 
+              ? 'Controle financeiro de débitos e pagamentos'
+              : 'Controle financeiro de transmissão de energia elétrica'}
+          </p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm">
@@ -402,29 +468,29 @@ const Dashboard = () => {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">{formatCurrency(dashboardData.financialMetrics.totalReceivable)}</div>
-                <p className="text-xs text-muted-foreground">Valor total de boletos gerados e a pagar</p>
+                <p className="text-xs text-muted-foreground">Valor total a pagar</p>
               </CardContent>
             </Card>
 
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Pagos no Mês</CardTitle>
+                <CardTitle className="text-sm font-medium">Pago</CardTitle>
                 <CheckCircle className="h-4 w-4 text-success" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold text-success">{formatCurrency(dashboardData.financialMetrics.monthlyCollection)}</div>
-                <p className="text-xs text-muted-foreground">Total de pagamentos efetuados no mês</p>
+                <div className="text-2xl font-bold text-success">{formatCurrency(dashboardData.financialMetrics.totalReceived)}</div>
+                <p className="text-xs text-muted-foreground">Valor já pago</p>
               </CardContent>
             </Card>
 
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Em Atraso</CardTitle>
+                <CardTitle className="text-sm font-medium">A Pagar</CardTitle>
                 <AlertTriangle className="h-4 w-4 text-destructive" />
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold text-destructive">{formatCurrency(dashboardData.financialMetrics.totalOverdue)}</div>
-                <p className="text-xs text-muted-foreground">Total em atraso</p>
+                <p className="text-xs text-muted-foreground">Valor pendente a pagar</p>
               </CardContent>
             </Card>
           </div>
@@ -549,10 +615,10 @@ const Dashboard = () => {
           </Card>
         </div>
       ) : (
-        // Default full dashboard for non-AVD users
+        // Dashboard para AVC (Aviso de Crédito) ou outros perfis
         <>
           {/* Financial Metrics Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                 <CardTitle className="text-sm font-medium">Total a Receber</CardTitle>
@@ -560,18 +626,18 @@ const Dashboard = () => {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">{formatCurrency(dashboardData.financialMetrics.totalReceivable)}</div>
-                <p className="text-xs text-muted-foreground">+12.5% em relação ao mês anterior</p>
+                <p className="text-xs text-muted-foreground">Valor total a receber</p>
               </CardContent>
             </Card>
 
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Recebido</CardTitle>
-                <TrendingUp className="h-4 w-4 text-success" />
+                <CardTitle className="text-sm font-medium">Recebido</CardTitle>
+                <CheckCircle className="h-4 w-4 text-success" />
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold text-success">{formatCurrency(dashboardData.financialMetrics.totalReceived)}</div>
-                <p className="text-xs text-muted-foreground">+8.2% em relação ao mês anterior</p>
+                <p className="text-xs text-muted-foreground">Valor já recebido</p>
               </CardContent>
             </Card>
 
@@ -582,18 +648,7 @@ const Dashboard = () => {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold text-destructive">{formatCurrency(dashboardData.financialMetrics.totalOverdue)}</div>
-                <p className="text-xs text-muted-foreground">23 inadimplentes ativos</p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Recebido no Mês</CardTitle>
-                <CheckCircle className="h-4 w-4 text-success" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatCurrency(dashboardData.financialMetrics.monthlyCollection)}</div>
-                <p className="text-xs text-muted-foreground">86% da meta mensal</p>
+                <p className="text-xs text-muted-foreground">Valor em atraso</p>
               </CardContent>
             </Card>
           </div>
@@ -667,7 +722,7 @@ const Dashboard = () => {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {dashboardData.recentActivities.map((activity) => (
+                {[].map((activity: any) => (
                   <div key={activity.id} className="flex items-center justify-between p-3 border rounded-lg">
                     <div className="flex items-center space-x-3">
                       {activity.type === 'payment' && <CheckCircle className="h-5 w-5 text-success" />}

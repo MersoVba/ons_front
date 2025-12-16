@@ -11,7 +11,9 @@ import { toast } from '@/hooks/use-toast';
 import { ProcessarComprovanteResponse, PagamentoBoleto, ComprovantePagamentoRequest, ComprovantePagamentoResponse, TipoDocumento } from '@shared/api';
 import { AuthAPI } from '@/lib/auth-api';
 import { AvdAPI, IntegracaoUsuariaTransmissoraResponse, FaturaResponse } from '@/lib/avd-api';
-import { API_BASE_URL_WITHOUT_VERSION } from '@/lib/api-config';
+import { API_BASE_URL, API_BASE_URL_WITHOUT_VERSION } from '@/lib/api-config';
+import { OpenFinanceAPI, IniciarPagamentoParcelaResponse } from '@/lib/open-finance-api';
+import { DashboardAPI, DashboardAvdResponse } from '@/lib/dashboard-api';
 import {
   Upload,
   Building2,
@@ -25,8 +27,17 @@ import {
   Download,
   Loader2,
   FileCheck,
-  Trash2
+  Trash2,
+  ChevronDown,
+  CreditCard,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Progress } from '@/components/ui/progress';
+import { cn } from '@/lib/utils';
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend } from 'recharts';
+import { AlertTriangle } from 'lucide-react';
 
 interface ParcelaDebito {
   cdParcela?: number;
@@ -35,8 +46,11 @@ interface ParcelaDebito {
   valor: number;
   comprovante?: File;
   status: 'aguardando' | 'enviado' | 'pago';
+  statusBackend?: string; // Status que vem do backend (ex: 'PAGO', 'ENVIADO', 'CONFIRMADA', 'REJEITADA', etc)
   dadosExtraidos?: PagamentoBoleto;
   linkDocumento?: string;
+  valorDivergente?: number; // Valor divergente (inadimplência) quando o pagamento foi menor que o esperado
+  formaPagamento?: string; // Forma de pagamento (ex: 'OPEN_FINANCE', 'BOLETO', etc)
 }
 
 interface Usuaria {
@@ -46,6 +60,7 @@ interface Usuaria {
   codigoUsuaria: string;
   tributos: number;
   valorTotal: number;
+  statusFatura?: string; // Status da fatura que vem do backend
   parcelas: ParcelaDebito[];
 }
 
@@ -53,19 +68,45 @@ const AvisoDebito = () => {
   const [selectedUsuariaForUpload, setSelectedUsuariaForUpload] = useState<Usuaria | null>(null);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(false);
+  const [isCNABDialogOpen, setIsCNABDialogOpen] = useState(false);
+  const [isOpenFinanceDialogOpen, setIsOpenFinanceDialogOpen] = useState(false);
+  const [selectedParcelasForOpenFinance, setSelectedParcelasForOpenFinance] = useState<Set<number>>(new Set());
+  const [cnabFile, setCnabFile] = useState<File | null>(null);
+  const [isProcessingCNAB, setIsProcessingCNAB] = useState(false);
   const [isProcessingPDF, setIsProcessingPDF] = useState(false);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [parcelasProcessando, setParcelasProcessando] = useState<Set<number>>(new Set());
+  const [parcelasProcessadas, setParcelasProcessadas] = useState<Set<number>>(new Set());
+  const [progressoProcessamento, setProgressoProcessamento] = useState<{
+    total: number;
+    processadas: number;
+    itens: Array<{ fatura: string; parcela: number; cdParcela: number; status: 'processando' | 'processada' | 'erro' }>;
+  } | null>(null);
   const [dadosExtraidosModal, setDadosExtraidosModal] = useState<{
     parcelaNumero: number;
     dados: PagamentoBoleto;
     banco: string;
     arquivo?: File;
   } | null>(null);
+  const [pagamentosOpenFinance, setPagamentosOpenFinance] = useState<Map<number, {
+    status: 'PENDENTE_BANCO' | 'CONFIRMADO' | 'FALHOU' | 'CRIADO';
+    externalPaymentId: string;
+    pagamentoId: number;
+  }>>(new Map());
   const [uploadingForUsuaria, setUploadingForUsuaria] = useState<{usuariaId: string, parcelaNumero: number} | null>(null);
 
   // Filter states
   const [filterUsuaria, setFilterUsuaria] = useState('');
   const [filterCnpj, setFilterCnpj] = useState('');
   const [filterCodigo, setFilterCodigo] = useState('');
+
+  // Estados de paginação
+  const [pagina, setPagina] = useState(0);
+  const [quantidade, setQuantidade] = useState(1000);
+  const [ordem, setOrdem] = useState<'ASC' | 'DESC'>('ASC');
+  const [ordenarPor, setOrdenarPor] = useState('transmissora');
+  const [totalPaginas, setTotalPaginas] = useState(1);
+  const [totalItens, setTotalItens] = useState(0);
 
   // Get user access type (opcional - não requer login)
   const [currentUser] = useState<{email?:string, accessType?:string}>(() => {
@@ -75,180 +116,203 @@ const AvisoDebito = () => {
 
   // Verificação de autenticação removida - acesso liberado
 
-  // Mock data for Aviso de Débito
-  const mockUsuarias: Usuaria[] = [
-    {
-      id: '1',
-      usuaria: 'RGE SUL (AES-SUL)',
-      cnpj: '02.016.440/0001-62',
-      codigoUsuaria: '2001',
-      tributos: 2075.95,
-      valorTotal: 56875.29,
-      parcelas: [
-        { numParcela: 1, data: '2025-04-15T00:00:00-03:00', valor: 0, status: 'aguardando' },
-        { numParcela: 2, data: '2025-04-25T00:00:00-03:00', valor: 56875.29, status: 'aguardando' },
-        { numParcela: 3, data: '2025-05-05T00:00:00-03:00', valor: 0, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '2',
-      usuaria: 'Empresa Energia Norte Ltda',
-      cnpj: '12.345.678/0001-90',
-      codigoUsuaria: '2002',
-      tributos: 1500.00,
-      valorTotal: 45000.00,
-      parcelas: [
-        { numParcela: 1, data: '2025-04-15T00:00:00-03:00', valor: 15000.00, status: 'aguardando' },
-        { numParcela: 2, data: '2025-04-25T00:00:00-03:00', valor: 15000.00, status: 'aguardando' },
-        { numParcela: 3, data: '2025-05-05T00:00:00-03:00', valor: 15000.00, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '3',
-      usuaria: 'Transmissora Centro-Oeste SA',
-      cnpj: '87.654.321/0001-45',
-      codigoUsuaria: '2003',
-      tributos: 3200.50,
-      valorTotal: 78900.75,
-      parcelas: [
-        { numParcela: 1, data: '2025-04-15T00:00:00-03:00', valor: 26300.25, status: 'aguardando' },
-        { numParcela: 2, data: '2025-04-25T00:00:00-03:00', valor: 26300.25, status: 'aguardando' },
-        { numParcela: 3, data: '2025-05-05T00:00:00-03:00', valor: 26300.25, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '4',
-      usuaria: 'Distribuidora Vale Energia',
-      cnpj: '11.222.333/0001-44',
-      codigoUsuaria: '2004',
-      tributos: 950.00,
-      valorTotal: 32500.00,
-      parcelas: [
-        { numParcela: 1, data: '2025-04-15T00:00:00-03:00', valor: 10833.33, status: 'aguardando' },
-        { numParcela: 2, data: '2025-04-25T00:00:00-03:00', valor: 10833.33, status: 'aguardando' },
-        { numParcela: 3, data: '2025-05-05T00:00:00-03:00', valor: 10833.34, status: 'aguardando' }
-      ]
-    },
-    {
-      id: '5',
-      usuaria: 'Geração Solar Brasil',
-      cnpj: '44.555.666/0001-77',
-      codigoUsuaria: '2005',
-      tributos: 1200.00,
-      valorTotal: 40000.00,
-      parcelas: [
-        { numParcela: 1, data: '2025-04-15T00:00:00-03:00', valor: 13333.33, status: 'aguardando' },
-        { numParcela: 2, data: '2025-04-25T00:00:00-03:00', valor: 13333.33, status: 'aguardando' },
-        { numParcela: 3, data: '2025-05-05T00:00:00-03:00', valor: 13333.34, status: 'aguardando' }
-      ]
-    }
-  ];
-
   const [usuarias, setUsuarias] = useState<Usuaria[]>([]);
   const [loadingUsuarias, setLoadingUsuarias] = useState(false);
+  const [dashboardData, setDashboardData] = useState<DashboardAvdResponse | null>(null);
+  const [loadingDashboard, setLoadingDashboard] = useState(false);
 
-  // Carregar dados do backend usando o endpoint de faturas
+  // Carregar dados do dashboard AVD
   useEffect(() => {
-    const carregarFaturas = async () => {
+    const carregarDashboard = async () => {
+      setLoadingDashboard(true);
+      try {
+        const data = await DashboardAPI.obterMetricasAvd();
+        setDashboardData(data);
+      } catch (error: any) {
+        console.error('Erro ao carregar dados do dashboard:', error);
+      } finally {
+        setLoadingDashboard(false);
+      }
+    };
+    
+    carregarDashboard();
+  }, []);
+
+  // Função para carregar dados do backend usando o endpoint de faturas
+  const carregarFaturas = async () => {
       setLoadingUsuarias(true);
       try {
         // Buscar todas as faturas com suas parcelas
-        const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(0, 5, 'ASC', 'transmissora');
+        const faturas: FaturaResponse[] = await AvdAPI.obterTodasFaturas(pagina, quantidade, ordem, ordenarPor);
         
         console.log('📋 Faturas carregadas da API:', faturas);
         console.log('📋 Primeira parcela (exemplo):', faturas[0]?.parcelas?.[0]);
+        if (faturas[0]?.parcelas?.[0]) {
+          console.log('📋 Status da primeira parcela:', faturas[0].parcelas[0].status);
+        }
         
-        // Agrupar faturas por usuária
-        const usuariasMap = new Map<string, Usuaria>();
-        
-        faturas.forEach((fatura: FaturaResponse) => {
-          if (!fatura.cnpjUsuaria || !fatura.usuaria) return;
-          
-          const usuariaKey = fatura.cnpjUsuaria;
-          
-          if (!usuariasMap.has(usuariaKey)) {
-            // Criar nova usuária
-            usuariasMap.set(usuariaKey, {
-              id: fatura.cdFatura?.toString() || fatura.cnpjUsuaria,
-              usuaria: fatura.usuaria || '',
-              cnpj: fatura.cnpjUsuaria || '',
-              codigoUsuaria: fatura.codigoUsuaria || '',
-              tributos: fatura.tributos ? Number(fatura.tributos) : 0,
-              valorTotal: fatura.valorTotal ? Number(fatura.valorTotal) : 0,
-              parcelas: []
-            });
-          }
-          
-          // Adicionar parcelas da fatura à usuária
-          const usuaria = usuariasMap.get(usuariaKey)!;
-          if (fatura.parcelas && fatura.parcelas.length > 0) {
-            fatura.parcelas.forEach((parcela) => {
-              if (parcela.numParcela && parcela.dataVencimento) {
-                // Verificar se a parcela já existe (evitar duplicatas)
-                const parcelaExistente = usuaria.parcelas.find(p => p.numParcela === parcela.numParcela);
-                
-                // Mapear id para cdParcela (API retorna como "id" mas backend espera "cdParcela")
-                const cdParcela = parcela.id || parcela.cdParcela;
-                
-                if (!parcelaExistente) {
-                  // Converter dataVencimento para ISO string
-                  const dataVencimento = new Date(parcela.dataVencimento + 'T00:00:00');
-                  
-                  if (!cdParcela) {
-                    console.error('❌ Parcela sem cdParcela (id):', {
-                      numParcela: parcela.numParcela,
-                      parcelaCompleta: parcela,
-                      id: parcela.id,
-                      cdParcela: parcela.cdParcela
-                    });
-                  }
-                  
-                  usuaria.parcelas.push({
-                    cdParcela: cdParcela,
-                    numParcela: parcela.numParcela,
-                    data: dataVencimento.toISOString(),
-                    valor: parcela.valor ? Number(parcela.valor) : 0,
-                    status: parcela.status === 'PAGO' ? 'pago' : 
-                           parcela.status === 'ENVIADO' ? 'enviado' : 
-                           'aguardando',
-                    linkDocumento: parcela.enderecoComprovante || undefined
-                  });
-                } else {
-                  // Atualizar o cdParcela se a parcela existente não tiver
-                  if (cdParcela && !parcelaExistente.cdParcela) {
-                    parcelaExistente.cdParcela = cdParcela;
-                    console.log('✅ cdParcela atualizado para parcela existente:', {
-                      numParcela: parcela.numParcela,
-                      cdParcela: cdParcela
-                    });
-                  }
+            // Agrupar faturas por usuária
+            const usuariasMap = new Map<string, Usuaria>();
+            
+            faturas.forEach((fatura: FaturaResponse) => {
+              if (!fatura.cnpjUsuaria || !fatura.usuaria) return;
+              
+              const usuariaKey = fatura.cnpjUsuaria;
+              
+              if (!usuariasMap.has(usuariaKey)) {
+                // Criar nova usuária
+                usuariasMap.set(usuariaKey, {
+                  id: fatura.cdFatura?.toString() || fatura.cnpjUsuaria,
+                  usuaria: fatura.usuaria || '',
+                  cnpj: fatura.cnpjUsuaria || '',
+                  codigoUsuaria: fatura.codigoUsuaria || '',
+                  tributos: fatura.tributos ? Number(fatura.tributos) : 0,
+                  valorTotal: fatura.valorTotal ? Number(fatura.valorTotal) : 0,
+                  statusFatura: fatura.statusFatura || undefined, // Armazenar statusFatura diretamente do backend
+                  parcelas: []
+                });
+              } else {
+                // Atualizar statusFatura se a usuária já existir (pode ter mudado)
+                const usuariaExistente = usuariasMap.get(usuariaKey)!;
+                if (fatura.statusFatura) {
+                  usuariaExistente.statusFatura = fatura.statusFatura;
                 }
               }
+              
+              // Adicionar parcelas da fatura à usuária
+              const usuaria = usuariasMap.get(usuariaKey)!;
+              if (fatura.parcelas && fatura.parcelas.length > 0) {
+                fatura.parcelas.forEach((parcela) => {
+                  if (parcela.numParcela && parcela.dataVencimento) {
+                    // Verificar se a parcela já existe (evitar duplicatas)
+                    const parcelaExistente = usuaria.parcelas.find(p => p.numParcela === parcela.numParcela);
+                    
+                    // Mapear id para cdParcela (API retorna como "id" mas backend espera "cdParcela")
+                    const cdParcela = parcela.id || parcela.cdParcela;
+                    
+                    // Priorizar status da parcela se existir e for um status de pagamento confirmado
+                    // Caso contrário, usar statusFatura da fatura
+                    // Status da parcela tem prioridade quando é CONFIRMADA, PAGO, LIQUIDADO, etc
+                    const statusParcelaNormalizado = parcela.status ? parcela.status.toUpperCase().trim() : '';
+                    const statusFinal = (statusParcelaNormalizado === 'CONFIRMADA' || 
+                                        statusParcelaNormalizado === 'PAGO' || 
+                                        statusParcelaNormalizado === 'LIQUIDADO' || 
+                                        statusParcelaNormalizado === 'LIQUIDADA') 
+                                      ? parcela.status 
+                                      : (parcela.status || fatura.statusFatura);
+                    
+                    if (!parcelaExistente) {
+                      // Converter dataVencimento para ISO string
+                      const dataVencimento = new Date(parcela.dataVencimento + 'T00:00:00');
+                      
+                      if (!cdParcela) {
+                        console.error('❌ Parcela sem cdParcela (id):', {
+                          numParcela: parcela.numParcela,
+                          parcelaCompleta: parcela,
+                          id: parcela.id,
+                          cdParcela: parcela.cdParcela
+                        });
+                      }
+                      
+                      // Normalizar status para comparação
+                      const statusNormalizado = statusFinal ? statusFinal.toUpperCase().trim() : '';
+                      
+                      usuaria.parcelas.push({
+                        cdParcela: cdParcela,
+                        numParcela: parcela.numParcela,
+                        data: dataVencimento.toISOString(),
+                        valor: parcela.valor ? Number(parcela.valor) : 0,
+                        status: statusNormalizado === 'PAGO' || 
+                               statusNormalizado === 'LIQUIDADO' || 
+                               statusNormalizado === 'LIQUIDADA' || 
+                               statusNormalizado === 'CONFIRMADA' ? 'pago' : 
+                               statusNormalizado === 'ENVIADO' ? 'enviado' : 
+                               statusNormalizado === 'REJEITADA' || statusNormalizado === 'REJEITADO' ? 'aguardando' :
+                               'aguardando',
+                        statusBackend: statusFinal || undefined, // Usar status da parcela ou statusFatura da fatura
+                        linkDocumento: parcela.enderecoComprovante || undefined,
+                        valorDivergente: parcela.valorDivergente ? Number(parcela.valorDivergente) : undefined,
+                        formaPagamento: parcela.formaPagamento || undefined
+                      });
+                      console.log('✅ Nova parcela adicionada:', {
+                        numParcela: parcela.numParcela,
+                        statusFatura: fatura.statusFatura,
+                        statusParcela: parcela.status,
+                        statusBackend: statusFinal,
+                        statusLocal: usuaria.parcelas[usuaria.parcelas.length - 1].status
+                      });
+                    } else {
+                      // Atualizar o cdParcela se a parcela existente não tiver
+                      if (cdParcela && !parcelaExistente.cdParcela) {
+                        parcelaExistente.cdParcela = cdParcela;
+                        console.log('✅ cdParcela atualizado para parcela existente:', {
+                          numParcela: parcela.numParcela,
+                          cdParcela: cdParcela
+                        });
+                      }
+                      // Atualizar valorDivergente se existir
+                      if (parcela.valorDivergente !== null && parcela.valorDivergente !== undefined) {
+                        parcelaExistente.valorDivergente = Number(parcela.valorDivergente);
+                      }
+                      // Atualizar formaPagamento se existir
+                      if (parcela.formaPagamento) {
+                        parcelaExistente.formaPagamento = parcela.formaPagamento;
+                      }
+                      // Atualizar status do backend (sempre atualizar, mesmo se já existir)
+                      if (statusFinal) {
+                        parcelaExistente.statusBackend = statusFinal;
+                        // Normalizar status para comparação
+                        const statusNormalizado = statusFinal.toUpperCase().trim();
+                        // Atualizar status local baseado no status do backend
+                        parcelaExistente.status = statusNormalizado === 'PAGO' || 
+                                                 statusNormalizado === 'LIQUIDADO' || 
+                                                 statusNormalizado === 'LIQUIDADA' || 
+                                                 statusNormalizado === 'CONFIRMADA' ? 'pago' : 
+                                                 statusNormalizado === 'ENVIADO' ? 'enviado' : 
+                                                 statusNormalizado === 'REJEITADA' || statusNormalizado === 'REJEITADO' ? 'aguardando' :
+                                                 'aguardando';
+                        console.log('✅ Status atualizado para parcela existente:', {
+                          numParcela: parcela.numParcela,
+                          statusFatura: fatura.statusFatura,
+                          statusParcela: parcela.status,
+                          statusBackend: statusFinal,
+                          statusLocal: parcelaExistente.status,
+                          formaPagamento: parcela.formaPagamento
+                        });
+                      }
+                    }
+                  }
+                });
+              }
             });
+            
+            // Converter Map para Array e ordenar parcelas de cada usuária
+            const usuariasComParcelas: Usuaria[] = Array.from(usuariasMap.values()).map(usuaria => ({
+              ...usuaria,
+              parcelas: usuaria.parcelas.sort((a, b) => a.numParcela - b.numParcela)
+            }));
+
+            // Atualizar total de itens (se a API retornar informações de paginação, usar; senão, usar quantidade retornada)
+            setTotalItens(faturas.length);
+
+            // Usar dados da API
+            setUsuarias(usuariasComParcelas);
+          } catch (error: any) {
+            console.error('Erro ao carregar faturas:', error);
+            toast({
+              title: 'Erro ao carregar dados',
+              description: error.message || 'Não foi possível carregar as faturas',
+              variant: 'destructive'
+            });
+            // Em caso de erro, limpar dados
+            setUsuarias([]);
+          } finally {
+            setLoadingUsuarias(false);
           }
-        });
-        
-        // Converter Map para Array e ordenar parcelas de cada usuária
-        const usuariasComParcelas: Usuaria[] = Array.from(usuariasMap.values()).map(usuaria => ({
-          ...usuaria,
-          parcelas: usuaria.parcelas.sort((a, b) => a.numParcela - b.numParcela)
-        }));
+        };
 
-        setUsuarias(usuariasComParcelas);
-      } catch (error: any) {
-        console.error('Erro ao carregar faturas:', error);
-        toast({
-          title: 'Erro ao carregar dados',
-          description: error.message || 'Não foi possível carregar as faturas',
-          variant: 'destructive'
-        });
-        // Em caso de erro, usar dados mockados como fallback
-        setUsuarias(mockUsuarias);
-      } finally {
-        setLoadingUsuarias(false);
-      }
-    };
-
+  // Carregar dados do backend usando o endpoint de faturas
+  useEffect(() => {
     carregarFaturas();
   }, []);
 
@@ -283,20 +347,129 @@ const AvisoDebito = () => {
     setIsUploadModalOpen(true);
   };
 
-  const handleDownloadComprovante = (comprovante: File, parcelaNumero: number) => {
-    const url = URL.createObjectURL(comprovante);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${selectedUsuariaForUpload?.usuaria}-parcela-${parcelaNumero}-${comprovante.name}`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const handleDownloadComprovante = async (comprovante: File | string | undefined, parcelaNumero: number, cdParcela?: number) => {
+    // Se houver cdParcela, usar a API externa diretamente para obter a URL
+    if (cdParcela) {
+      try {
+        console.log(`🔍 Buscando URL do comprovante para parcela ${cdParcela} via API externa`);
+        
+        const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/comprovantes/link/${cdParcela}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Erro ao buscar comprovante: ${response.status}`);
+        }
+        
+        // A API retorna JSON com { url: "..." } ou { link: "..." }
+        const data = await response.json();
+        const cleanUrl = data.url || data.link;
+        
+        if (!cleanUrl || !cleanUrl.startsWith('http')) {
+          throw new Error('URL do comprovante inválida');
+        }
+        
+        console.log('🔗 Fazendo download da URL:', cleanUrl);
+        
+        // Abrir a URL diretamente para download
+        const link = document.createElement('a');
+        link.href = cleanUrl;
+        link.download = `${selectedUsuariaForUpload?.usuaria}-parcela-${parcelaNumero}.pdf`;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        toast({
+          title: 'Download iniciado',
+          description: 'Documento baixado com sucesso'
+        });
+      } catch (error: any) {
+        console.error('Erro ao baixar documento:', error);
+        toast({
+          title: 'Erro ao baixar documento',
+          description: error.message || 'Não foi possível baixar o documento',
+          variant: 'destructive'
+        });
+      }
+      return;
+    }
+
+    // Se for um File, usar o método original
+    if (comprovante instanceof File) {
+      const url = URL.createObjectURL(comprovante);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${selectedUsuariaForUpload?.usuaria}-parcela-${parcelaNumero}-${comprovante.name}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
   };
 
-  const handlePreviewComprovante = (comprovante: File) => {
-    const url = URL.createObjectURL(comprovante);
-    window.open(url, '_blank');
+  const handlePreviewComprovante = async (comprovante: File | string | undefined, cdParcela?: number) => {
+    // Se houver cdParcela, usar a API externa diretamente para obter a URL
+    if (cdParcela) {
+      try {
+        console.log(`🔍 Buscando URL do comprovante para parcela ${cdParcela} via API externa`);
+        
+        const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/comprovantes/link/${cdParcela}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Erro ao buscar comprovante: ${response.status}`);
+        }
+        
+        // A API retorna JSON com { url: "..." } ou { link: "..." }
+        const data = await response.json();
+        const cleanUrl = data.url || data.link;
+        
+        if (!cleanUrl || !cleanUrl.startsWith('http')) {
+          throw new Error('URL do comprovante inválida');
+        }
+        
+        console.log('🔗 Abrindo URL do comprovante:', cleanUrl);
+        
+        // Abrir a URL diretamente em nova aba
+        const newWindow = window.open(cleanUrl, '_blank');
+        
+        if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+          throw new Error('Não foi possível abrir a janela. Verifique se o pop-up está bloqueado.');
+        }
+      } catch (error: any) {
+        console.error('❌ Erro ao visualizar documento:', error);
+        toast({
+          title: 'Erro ao visualizar documento',
+          description: error.message || 'Não foi possível visualizar o documento',
+          variant: 'destructive'
+        });
+      }
+      return;
+    }
+
+    // Se for uma string (URL), abrir diretamente
+    if (typeof comprovante === 'string') {
+      window.open(comprovante, '_blank');
+      return;
+    }
+
+    // Se for um File, usar o método original
+    if (comprovante instanceof File) {
+      const url = URL.createObjectURL(comprovante);
+      window.open(url, '_blank');
+    }
   };
 
   const processarPDF = async (file: File, parcelaNumero: number, usuariaId?: string) => {
@@ -594,8 +767,515 @@ const AvisoDebito = () => {
     };
   };
 
+  const handleAlterarComprovante = async (parcelaNumero: number, file: File, cdParcela?: number) => {
+    if (!cdParcela) {
+      toast({
+        title: 'Erro',
+        description: 'ID da parcela não encontrado. Por favor, recarregue a página.',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+    setIsProcessingPDF(true);
+    try {
+      const token = AuthAPI.getToken();
+      if (!token) {
+        throw new Error('Usuário não autenticado');
+      }
+
+      const cleanToken = token.trim().replace(/[\r\n]/g, '');
+      const formData = new FormData();
+      formData.append('arquivo', file);
+      formData.append('idParcela', cdParcela.toString());
+
+      const response = await fetch(`${API_BASE_URL_WITHOUT_VERSION}/comprovantes/alterar`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${cleanToken}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Erro ao alterar comprovante' }));
+        throw new Error(errorData.error || 'Erro ao alterar comprovante');
+      }
+
+      const result = await response.json().catch(() => ({}));
+
+      // Atualizar estado local
+      setUsuarias(prev => prev.map(usr => {
+        if (usr.id === selectedUsuariaForUpload?.id) {
+          return {
+            ...usr,
+            parcelas: usr.parcelas.map(parc => {
+              if (parc.numParcela === parcelaNumero) {
+                return {
+                  ...parc,
+                  comprovante: file,
+                  linkDocumento: result.linkDocumento || parc.linkDocumento,
+                  status: 'enviado' as const
+                };
+              }
+              return parc;
+            })
+          };
+        }
+        return usr;
+      }));
+
+      toast({
+        title: 'Comprovante alterado com sucesso',
+        description: `Comprovante da parcela ${parcelaNumero} foi alterado com sucesso`
+      });
+    } catch (error) {
+      console.error('Erro ao alterar comprovante:', error);
+      toast({
+        title: 'Erro ao alterar comprovante',
+        description: error instanceof Error ? error.message : 'Não foi possível alterar o comprovante',
+        variant: 'destructive'
+      });
+    } finally {
+      setIsProcessingPDF(false);
+    }
+  };
+
+  // Gerar arquivo CNAB - chama API sem enviar parcelas
+  const handleGerarCNAB = async () => {
+    try {
+      // Chamar API para gerar arquivo CNAB
+      const token = AuthAPI.getToken();
+      if (!token) {
+        throw new Error('Usuário não autenticado');
+      }
+
+      const cleanToken = token.trim().replace(/[\r\n]/g, '');
+      
+      // O endpoint remessa está em /ons-api/api/v1/remessa/gerarArquivoCnab
+      // Usar API_BASE_URL que já inclui /api/v1
+      const urlCompleta = `${API_BASE_URL}/remessa/gerarArquivoCnab`;
+      console.log('🔗 URL da API:', urlCompleta);
+      
+      const response = await fetch(urlCompleta, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${cleanToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Erro ao gerar arquivo CNAB');
+        throw new Error(errorText || 'Erro ao gerar arquivo CNAB');
+      }
+
+      // A API retorna JSON com o arquivo em base64
+      const data = await response.json();
+      
+      if (!data.arquivo) {
+        throw new Error('Resposta da API não contém o arquivo');
+      }
+
+      // Decodificar base64 para blob
+      const base64Data = data.arquivo;
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: 'text/plain' });
+      
+      // Usar o nome do arquivo retornado pela API ou gerar um padrão
+      const nomeArquivo = data.nomeArquivo || `remessa_cnab_${new Date().toISOString().split('T')[0].replace(/-/g, '')}.txt`;
+      
+      // Fazer download do arquivo
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = nomeArquivo;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast({
+        title: 'Arquivo CNAB gerado',
+        description: data.mensagem || `Arquivo gerado com ${data.quantidadeRegistros || 0} registros`
+      });
+    } catch (error) {
+      console.error('Erro ao gerar CNAB:', error);
+      toast({
+        title: 'Erro ao gerar CNAB',
+        description: error instanceof Error ? error.message : 'Erro desconhecido',
+        variant: 'destructive'
+      });
+    }
+  };
+
+  // Pagar parcela via Open Finance
+  const handlePagarViaOpenFinance = async (cdParcela: number, valor: number) => {
+    try {
+      // Iniciar pagamento
+      const response: IniciarPagamentoParcelaResponse = await OpenFinanceAPI.iniciarPagamento({
+        parcelaId: cdParcela,
+        valor: valor
+      });
+
+      // Salvar informações do pagamento
+      setPagamentosOpenFinance(prev => {
+        const newMap = new Map(prev);
+        newMap.set(cdParcela, {
+          status: response.status,
+          externalPaymentId: response.externalPaymentId,
+          pagamentoId: response.pagamentoId
+        });
+        return newMap;
+      });
+
+      toast({
+        title: 'Pagamento iniciado',
+        description: response.status === 'PENDENTE_BANCO' 
+          ? 'Aguardando confirmação do banco...' 
+          : 'Pagamento processado com sucesso!'
+      });
+
+      // Se estiver pendente, iniciar polling para verificar status
+      if (response.status === 'PENDENTE_BANCO') {
+        // Polling a cada 2 segundos por até 30 segundos
+        let tentativas = 0;
+        const maxTentativas = 15; // 30 segundos / 2 segundos
+
+        const intervalId = setInterval(async () => {
+          tentativas++;
+          
+          try {
+            // Tentar verificar status do pagamento
+            const statusPagamento = await OpenFinanceAPI.verificarStatusPagamento(response.pagamentoId);
+            
+            if (statusPagamento && (statusPagamento.status === 'CONFIRMADO' || statusPagamento.status === 'FALHOU')) {
+              clearInterval(intervalId);
+              
+              // Atualizar estado do pagamento
+              setPagamentosOpenFinance(prev => {
+                const newMap = new Map(prev);
+                const pagamento = newMap.get(cdParcela);
+                if (pagamento) {
+                  newMap.set(cdParcela, {
+                    ...pagamento,
+                    status: statusPagamento.status
+                  });
+                }
+                return newMap;
+              });
+
+              // Recarregar dados para atualizar status da parcela
+              await carregarFaturas();
+
+              toast({
+                title: statusPagamento.status === 'CONFIRMADO' ? 'Pagamento confirmado!' : 'Pagamento falhou',
+                description: statusPagamento.status === 'CONFIRMADO' 
+                  ? 'O pagamento foi confirmado com sucesso' 
+                  : 'O pagamento foi rejeitado. Tente novamente.',
+                variant: statusPagamento.status === 'CONFIRMADO' ? 'default' : 'destructive'
+              });
+            }
+          } catch (error) {
+            // Se o endpoint não existir, apenas logar o erro e continuar tentando
+            // O backend processa automaticamente após alguns segundos
+            console.log('Aguardando processamento automático do backend...');
+          }
+
+          // Timeout após max tentativas
+          if (tentativas >= maxTentativas) {
+            clearInterval(intervalId);
+            toast({
+              title: 'Timeout',
+              description: 'Não foi possível confirmar o status do pagamento. Verifique mais tarde.',
+              variant: 'destructive'
+            });
+          }
+        }, 2000);
+      } else if (response.status === 'CONFIRMADO') {
+        // Se já foi confirmado, recarregar dados
+        await carregarFaturas();
+      }
+    } catch (error: any) {
+      console.error('Erro ao pagar via Open Finance:', error);
+      toast({
+        title: 'Erro ao iniciar pagamento',
+        description: error.message || 'Não foi possível iniciar o pagamento via Open Finance',
+        variant: 'destructive'
+      });
+    }
+  };
+
+  // Processar arquivo CNAB retornado do banco
+  const handleProcessarCNAB = async () => {
+    if (!cnabFile) {
+      toast({
+        title: 'Arquivo não selecionado',
+        description: 'Por favor, selecione um arquivo CNAB para processar',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+    setIsProcessingCNAB(true);
+    setProgressoProcessamento(null);
+    
+    try {
+      // Primeiro, ler o arquivo para identificar as parcelas que serão processadas
+      const fileContent = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          resolve(e.target?.result as string);
+        };
+        reader.onerror = reject;
+        reader.readAsText(cnabFile);
+      });
+
+      // Processar linhas do arquivo CNAB para identificar parcelas
+      const linhas = fileContent.split(/\r?\n/).filter(linha => linha.trim().length > 0);
+      const parcelasIdentificadas: Array<{ cdParcela: number; fatura: string }> = [];
+
+      // Processar linha por linha para identificar parcelas
+      for (let index = 0; index < linhas.length; index++) {
+        const linha = linhas[index];
+        
+        if (linha.length >= 1 && linha[0] === '3') {
+          if (linha.length >= 150 && linha.length >= 11 && linha[10] === 'A') {
+            try {
+              const nossoNumero = linha.substring(129, 149).trim();
+              const codigoOcorrencia = linha.length >= 232 ? linha.substring(229, 231).trim() : '';
+              
+              if (nossoNumero && nossoNumero !== '00000000000000000000' && nossoNumero !== '') {
+                const cdParcela = parseInt(nossoNumero);
+                if (!isNaN(cdParcela) && cdParcela > 0) {
+                  const codigoOk = !codigoOcorrencia || codigoOcorrencia === '' || ['00', '01', '02', '06'].includes(codigoOcorrencia);
+                  
+                  if (codigoOk) {
+                    // Encontrar a fatura correspondente
+                    const faturaEncontrada = usuarias.find(usr => 
+                      usr.parcelas.some(parc => parc.cdParcela === cdParcela)
+                    );
+                    const nomeFatura = faturaEncontrada ? faturaEncontrada.usuaria : `Fatura ${cdParcela}`;
+                    
+                    parcelasIdentificadas.push({
+                      cdParcela,
+                      fatura: nomeFatura
+                    });
+                  }
+                }
+              }
+            } catch (error) {
+              console.error(`Erro ao processar linha ${index + 1}:`, error);
+            }
+          }
+        }
+      }
+
+      // Inicializar progresso
+      const totalParcelas = parcelasIdentificadas.length;
+      const itensProgresso = parcelasIdentificadas.map(item => ({
+        fatura: item.fatura,
+        parcela: item.cdParcela,
+        cdParcela: item.cdParcela,
+        status: 'processando' as const
+      }));
+
+      setProgressoProcessamento({
+        total: totalParcelas,
+        processadas: 0,
+        itens: itensProgresso
+      });
+
+      // Converter arquivo para base64
+      const arquivoBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const result = e.target?.result as string;
+          const base64 = result.includes(',') ? result.split(',')[1] : result;
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(cnabFile);
+      });
+
+      // Chamar API para processar remessa de pagamento
+      const token = AuthAPI.getToken();
+      if (!token) {
+        throw new Error('Usuário não autenticado');
+      }
+
+      const cleanToken = token.trim().replace(/[\r\n]/g, '');
+
+      const urlCompleta = `${API_BASE_URL}/remessa/remessaPagamento`;
+      console.log('🔗 URL da API:', urlCompleta);
+
+      const response = await fetch(urlCompleta, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${cleanToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          arquivoBase64: arquivoBase64,
+          nomeArquivo: cnabFile.name
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Erro ao processar remessa de pagamento');
+        throw new Error(errorText || 'Erro ao processar remessa de pagamento');
+      }
+
+      // Verificar o Content-Type da resposta
+      const contentType = response.headers.get('content-type');
+      let data: any = {};
+      let mensagemSucesso = '';
+
+      if (contentType && contentType.includes('application/json')) {
+        // Se for JSON, fazer parse
+        try {
+          data = await response.json();
+          mensagemSucesso = data.mensagem || data.message || '';
+        } catch (jsonError) {
+          // Se falhar o parse JSON, tentar ler como texto
+          const textResponse = await response.text();
+          mensagemSucesso = textResponse || 'Arquivo processado com sucesso';
+        }
+      } else {
+        // Se não for JSON, ler como texto
+        const textResponse = await response.text();
+        mensagemSucesso = textResponse || 'Arquivo processado com sucesso';
+      }
+
+      console.log('✅ Resposta da API:', data);
+
+      // Processar resposta da API e atualizar status das parcelas
+      if (data) {
+        // Se a resposta contém statusFatura ou lista de parcelas processadas
+        const statusFatura = data.statusFatura;
+        const parcelasProcessadas = data.parcelasProcessadas || data.parcelas || (Array.isArray(data) ? data : []);
+        
+        setUsuarias(prev => {
+          return prev.map(usr => {
+            const parcelasAtualizadasUsr = usr.parcelas.map(parc => {
+              // Verificar se esta parcela foi processada na resposta
+              const parcelaProcessada = parcelasProcessadas.find((p: any) => 
+                p.cdParcela === parc.cdParcela || 
+                p.id === parc.cdParcela ||
+                (p.numParcela && p.numParcela === parc.numParcela)
+              );
+              
+              // Se encontrou a parcela na resposta, atualizar status
+              // IMPORTANTE: Priorizar statusFatura da fatura, não o status individual da parcela
+              if (parcelaProcessada) {
+                // Priorizar statusFatura da fatura (da resposta geral) sobre status da parcela individual
+                const novoStatus = statusFatura || parcelaProcessada.statusFatura || parcelaProcessada.status || 'LIQUIDADO';
+                console.log(`🔄 Atualizando parcela ${parc.cdParcela} com statusFatura da fatura:`, statusFatura, 'status final:', novoStatus);
+                return {
+                  ...parc,
+                  status: (novoStatus === 'LIQUIDADO' || novoStatus === 'LIQUIDADA' || novoStatus === 'PAGO' || novoStatus === 'CONFIRMADA') ? 'pago' as const : parc.status,
+                  statusBackend: novoStatus
+                };
+              }
+              
+              // Se a resposta tem statusFatura geral e a parcela está na lista de processadas do progresso
+              if (statusFatura && progressoProcessamento?.itens.some(item => item.cdParcela === parc.cdParcela)) {
+                console.log(`🔄 Atualizando parcela ${parc.cdParcela} com statusFatura geral da fatura:`, statusFatura);
+                return {
+                  ...parc,
+                  status: (statusFatura === 'LIQUIDADA' || statusFatura === 'LIQUIDADO') ? 'pago' as const : parc.status,
+                  statusBackend: statusFatura
+                };
+              }
+              
+              return parc;
+            });
+            
+            return {
+              ...usr,
+              parcelas: parcelasAtualizadasUsr
+            };
+          });
+        });
+      }
+
+      // Atualizar progresso - marcar todas como processadas
+      setProgressoProcessamento(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          processadas: prev.total,
+          itens: prev.itens.map(item => ({
+            ...item,
+            status: 'processada' as const
+          }))
+        };
+      });
+
+      // Aguardar um pouco para mostrar o progresso completo
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Recarregar dados do backend para atualizar status das parcelas
+      await carregarFaturas();
+
+      // Toast de sucesso
+      toast({
+        title: 'Remessa de pagamento processada com sucesso',
+        description: mensagemSucesso || `${totalParcelas} parcelas processadas e baixas aplicadas`
+      });
+
+      // Limpar progresso após um delay
+      setTimeout(() => {
+        setProgressoProcessamento(null);
+        setIsCNABDialogOpen(false);
+        setCnabFile(null);
+        setParcelasProcessando(new Set());
+        setParcelasProcessadas(new Set());
+      }, 2000);
+    } catch (error) {
+      console.error('Erro ao processar CNAB:', error);
+      
+      // Marcar itens como erro
+      setProgressoProcessamento(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          itens: prev.itens.map(item => ({
+            ...item,
+            status: 'erro' as const
+          }))
+        };
+      });
+
+      toast({
+        title: 'Erro ao processar CNAB',
+        description: error instanceof Error ? error.message : 'Não foi possível processar o arquivo CNAB',
+        variant: 'destructive'
+      });
+      
+      // Limpar estados de processamento em caso de erro
+      setTimeout(() => {
+        setParcelasProcessando(new Set());
+        setParcelasProcessadas(new Set());
+        setProgressoProcessamento(null);
+      }, 3000);
+    } finally {
+      setIsProcessingCNAB(false);
+    }
+  };
+
   const handleUploadFile = async (parcelaNumero: number, file: File, usuariaId?: string) => {
     const targetUsuariaId = usuariaId || selectedUsuariaForUpload?.id;
+    const parcela = selectedUsuariaForUpload?.parcelas.find(p => p.numParcela === parcelaNumero);
+    
+    // Se já existe comprovante, usar a API de alterar
+    if (parcela && (parcela.comprovante || parcela.linkDocumento) && parcela.cdParcela) {
+      await handleAlterarComprovante(parcelaNumero, file, parcela.cdParcela);
+      return;
+    }
     
     // Se for PDF, processar automaticamente
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
@@ -686,6 +1366,28 @@ const AvisoDebito = () => {
   };
 
   const getParcelaStatusBadge = (parcela: ParcelaDebito) => {
+    // Priorizar status do backend se existir
+    if (parcela.statusBackend) {
+      // Normalizar o status: remover espaços, converter para maiúsculas e normalizar caracteres especiais
+      const status = parcela.statusBackend.toUpperCase().trim().replace(/\s+/g, '_').replace(/Á/g, 'A').replace(/É/g, 'E').replace(/Í/g, 'I').replace(/Ó/g, 'O').replace(/Ú/g, 'U');
+      
+      if (status === 'CONFIRMADA' || status === 'PAGO' || status === 'LIQUIDADO' || status === 'LIQUIDADA') {
+        return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Liquidado</Badge>;
+      }
+      if (status === 'REJEITADA' || status === 'REJEITADO') {
+        return <Badge variant="destructive"><X className="h-3 w-3 mr-1" />Rejeitado</Badge>;
+      }
+      if (status === 'PENDENTES' || status === 'PENDENTE') {
+        return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Pendente</Badge>;
+      }
+      if (status === 'EM_ANALISE' || status.includes('ANALISE')) {
+        return <Badge variant="secondary" className="bg-yellow-500 text-yellow-foreground"><Clock className="h-3 w-3 mr-1" />Em análise</Badge>;
+      }
+      if (status === 'ENVIADO') {
+        return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Enviado</Badge>;
+      }
+    }
+    // Fallback para status local
     if (parcela.comprovante || parcela.linkDocumento) {
       return <Badge variant="default" className="bg-success text-success-foreground"><CheckCircle className="h-3 w-3 mr-1" />Pago</Badge>;
     }
@@ -761,6 +1463,26 @@ const AvisoDebito = () => {
         </Drawer>
       </div>
 
+      {/* Botões de ação em massa - Upload de Remessa de Pagamento */}
+      <div className="flex gap-2 mb-4">
+        <Button onClick={handleGerarCNAB} variant="outline" className="flex items-center gap-2">
+          <FileCheck className="h-4 w-4" />
+          Gerar Arquivo CNAB
+        </Button>
+        <Button onClick={() => setIsCNABDialogOpen(true)} variant="default" className="flex items-center gap-2 bg-primary">
+          <Upload className="h-4 w-4" />
+          Upload Remessa de Pagamento
+        </Button>
+        <Button 
+          onClick={() => setIsOpenFinanceDialogOpen(true)} 
+          variant="default" 
+          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700"
+        >
+          <CreditCard className="h-4 w-4" />
+          Pagar via Open Finance
+        </Button>
+      </div>
+
       {/* Estatísticas */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Card>
@@ -782,11 +1504,113 @@ const AvisoDebito = () => {
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{formatCurrency(filteredUsuarias.reduce((sum, u) => sum + u.valorTotal, 0))}</div>
+            {loadingDashboard ? (
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <div className="text-2xl font-bold">Carregando...</div>
+              </div>
+            ) : (
+              <div className="text-2xl font-bold">
+                {formatCurrency(dashboardData?.totalPagar ?? 0)}
+              </div>
+            )}
             <p className="text-xs text-muted-foreground">Débitos pendentes</p>
           </CardContent>
         </Card>
       </div>
+
+      {/* Controles de Paginação */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="quantidade" className="text-sm">Itens por página:</Label>
+                <Select
+                  value={quantidade.toString()}
+                  onValueChange={(value) => {
+                    setQuantidade(Number(value));
+                    setPagina(0);
+                  }}
+                >
+                  <SelectTrigger className="w-32">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="100">100</SelectItem>
+                    <SelectItem value="500">500</SelectItem>
+                    <SelectItem value="1000">1000</SelectItem>
+                    <SelectItem value="2000">2000</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="ordenarPor" className="text-sm">Ordenar por:</Label>
+                <Select
+                  value={ordenarPor}
+                  onValueChange={(value) => {
+                    setOrdenarPor(value);
+                    setPagina(0);
+                  }}
+                >
+                  <SelectTrigger className="w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="transmissora">Transmissora</SelectItem>
+                    <SelectItem value="usuaria">Usuária</SelectItem>
+                    <SelectItem value="valorTotal">Valor Total</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="ordem" className="text-sm">Ordem:</Label>
+                <Select
+                  value={ordem}
+                  onValueChange={(value: 'ASC' | 'DESC') => {
+                    setOrdem(value);
+                    setPagina(0);
+                  }}
+                >
+                  <SelectTrigger className="w-32">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ASC">Crescente</SelectItem>
+                    <SelectItem value="DESC">Decrescente</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPagina(prev => Math.max(0, prev - 1))}
+                disabled={pagina === 0 || loadingUsuarias}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="text-sm text-muted-foreground min-w-[120px] text-center">
+                Página {pagina + 1} de {totalPaginas}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPagina(prev => prev + 1)}
+                disabled={pagina >= totalPaginas - 1 || loadingUsuarias}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          {totalItens > 0 && (
+            <p className="text-xs text-muted-foreground mt-2">
+              Total de {totalItens} faturas encontradas
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Lista de Usuárias - Tabela */}
       <Card>
@@ -809,77 +1633,205 @@ const AvisoDebito = () => {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Usuária</TableHead>
-                    <TableHead>CNPJ</TableHead>
-                    <TableHead>Código</TableHead>
-                    <TableHead className="text-right">Tributos</TableHead>
-                    <TableHead className="text-right">Valor Total</TableHead>
-                    <TableHead className="text-center">Parcelas</TableHead>
-                    <TableHead className="text-center">Status</TableHead>
-                    <TableHead className="text-center">Ações</TableHead>
+                    <TableHead className="w-12 align-middle"></TableHead>
+                    <TableHead className="align-middle">Usuária</TableHead>
+                    <TableHead className="align-middle">CNPJ</TableHead>
+                    <TableHead className="align-middle">Código</TableHead>
+                    <TableHead className="text-right align-middle">Valor Total</TableHead>
+                    <TableHead className="text-right align-middle">Inadimplência</TableHead>
+                    <TableHead className="text-center align-middle">Parcelas</TableHead>
+                    <TableHead className="text-center align-middle">Status</TableHead>
+                    <TableHead className="text-center align-middle">Ações</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filteredUsuarias.map((usuaria) => {
-                    const totalComprovantes = usuaria.parcelas.filter(p => p.comprovante).length;
+                    const totalComprovantes = usuaria.parcelas.filter(p => p.comprovante || p.linkDocumento).length;
                     const statusGeral = totalComprovantes === usuaria.parcelas.length ? 'completo' : totalComprovantes > 0 ? 'parcial' : 'pendente';
+                    const isExpanded = expandedRow === usuaria.id;
+                    // Calcular inadimplência total da fatura (soma de todos os valorDivergente das parcelas)
+                    const inadimplenciaTotal = usuaria.parcelas.reduce((sum, parcela) => {
+                      return sum + (parcela.valorDivergente && parcela.valorDivergente > 0 ? parcela.valorDivergente : 0);
+                    }, 0);
 
                     return (
-                      <TableRow key={usuaria.id}>
-                        <TableCell className="font-medium">{usuaria.usuaria}</TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{usuaria.cnpj}</TableCell>
-                        <TableCell className="text-sm">{usuaria.codigoUsuaria}</TableCell>
-                        <TableCell className="text-right font-semibold">{formatCurrency(usuaria.tributos)}</TableCell>
-                        <TableCell className="text-right font-semibold">{formatCurrency(usuaria.valorTotal)}</TableCell>
-                        <TableCell className="text-center">
-                          <div className="flex flex-col items-center gap-1">
-                            {usuaria.parcelas.map((p) => (
-                              <Badge key={p.numParcela} variant="outline" className="text-xs">
-                                {new Date(p.data).getDate()}/{String(new Date(p.data).getMonth() + 1).padStart(2, '0')}
-                              </Badge>
-                            ))}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-center">
-                          {statusGeral === 'completo' && <Badge className="bg-success">Completo</Badge>}
-                          {statusGeral === 'parcial' && <Badge variant="secondary">Parcial ({totalComprovantes}/{usuaria.parcelas.length})</Badge>}
-                          {statusGeral === 'pendente' && <Badge variant="outline">Pendente</Badge>}
-                        </TableCell>
-                        <TableCell className="text-center">
-                          <div className="flex items-center justify-center gap-1">
+                      <React.Fragment key={usuaria.id}>
+                        <TableRow className="hover:bg-muted/50">
+                          <TableCell className="align-middle">
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => handleUsuariaClick(usuaria)}
+                              onClick={() => {
+                                setExpandedRow(expandedRow === usuaria.id ? null : usuaria.id);
+                              }}
+                              className="h-8 w-8 p-0"
+                              title="Expandir/Recolher"
+                            >
+                              <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                            </Button>
+                          </TableCell>
+                          <TableCell className="font-medium align-middle">{usuaria.usuaria}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground align-middle">{usuaria.cnpj}</TableCell>
+                          <TableCell className="text-sm align-middle">{usuaria.codigoUsuaria}</TableCell>
+                          <TableCell className="text-right font-semibold align-middle">{formatCurrency(usuaria.valorTotal)}</TableCell>
+                          <TableCell className="text-right align-middle">
+                            {inadimplenciaTotal > 0 ? (
+                              <div className="flex flex-col items-end">
+                                <span className="font-semibold text-red-600 dark:text-red-400">
+                                  {formatCurrency(inadimplenciaTotal)}
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  {((inadimplenciaTotal / usuaria.valorTotal) * 100).toFixed(1)}%
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-center align-middle">
+                            {!isExpanded && (
+                              <div className="flex flex-col items-center gap-1">
+                                {usuaria.parcelas.map((p) => (
+                                  <Badge key={p.numParcela} variant="outline" className="text-xs">
+                                    {new Date(p.data).getDate()}/{String(new Date(p.data).getMonth() + 1).padStart(2, '0')}
+                                  </Badge>
+                                ))}
+                              </div>
+                            )}
+                            {isExpanded && (
+                              <span className="text-xs text-muted-foreground">{usuaria.parcelas.length} parcelas</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-center align-middle">
+                            {usuaria.statusFatura ? (
+                              (() => {
+                                const status = usuaria.statusFatura.toUpperCase().trim();
+                                if (status === 'LIQUIDADA' || status === 'LIQUIDADO') {
+                                  return <Badge className="bg-success"><CheckCircle className="h-3 w-3 mr-1" />Liquidada</Badge>;
+                                }
+                                if (status === 'PENDENTE' || status === 'PENDENTES') {
+                                  return <Badge variant="secondary"><Clock className="h-3 w-3 mr-1" />Pendente</Badge>;
+                                }
+                                if (status === 'EM_ANALISE' || status.includes('ANALISE')) {
+                                  return <Badge variant="secondary" className="bg-yellow-500 text-yellow-foreground"><Clock className="h-3 w-3 mr-1" />Em análise</Badge>;
+                                }
+                                if (status === 'REJEITADA' || status === 'REJEITADO') {
+                                  return <Badge variant="destructive"><X className="h-3 w-3 mr-1" />Rejeitada</Badge>;
+                                }
+                                // Exibir o status exatamente como vem do backend
+                                return <Badge variant="outline">{usuaria.statusFatura}</Badge>;
+                              })()
+                            ) : (
+                              // Fallback para status calculado se não houver statusFatura
+                              <>
+                                {statusGeral === 'completo' && <Badge className="bg-success">Completo</Badge>}
+                                {statusGeral === 'parcial' && <Badge variant="secondary">Parcial ({totalComprovantes}/{usuaria.parcelas.length})</Badge>}
+                                {statusGeral === 'pendente' && <Badge variant="outline">Pendente</Badge>}
+                              </>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-center align-middle">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleUsuariaClick(usuaria);
+                              }}
                               className="h-8 w-8 p-0"
                               title="Gerenciar comprovantes"
                             >
                               <Eye className="h-4 w-4" />
                             </Button>
-                            {usuaria.parcelas.length > 0 && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => {
-                                  // Upload para a primeira parcela sem comprovante, ou primeira parcela se todas tiverem
-                                  const parcelaSemComprovante = usuaria.parcelas.find(p => !p.comprovante);
-                                  const parcelaParaUpload = parcelaSemComprovante || usuaria.parcelas[0];
-                                  handleQuickUpload(usuaria, parcelaParaUpload.numParcela);
-                                }}
-                                className="h-8 w-8 p-0"
-                                title="Upload de comprovante"
-                                disabled={uploadingForUsuaria?.usuariaId === usuaria.id && isProcessingPDF}
-                              >
-                                {uploadingForUsuaria?.usuariaId === usuaria.id && isProcessingPDF ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Upload className="h-4 w-4" />
-                                )}
-                              </Button>
-                            )}
-                          </div>
-                        </TableCell>
-                      </TableRow>
+                          </TableCell>
+                        </TableRow>
+                        {isExpanded && (
+                          <TableRow>
+                            <TableCell colSpan={9} className="p-0 bg-muted/30">
+                              <div className="p-4">
+                                <h4 className="font-semibold mb-3">Parcelas Detalhadas</h4>
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                  {usuaria.parcelas.map((parcela) => (
+                                    <Card key={parcela.numParcela} className="p-3">
+                                      <div className="flex justify-between items-start mb-2">
+                                        <div>
+                                          <p className="font-medium">Parcela {parcela.numParcela}</p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Vencimento: {new Date(parcela.data).toLocaleDateString('pt-BR')}
+                                            {parcela.formaPagamento && (
+                                              <span className="ml-1">
+                                                • {parcela.formaPagamento === 'OPEN_FINANCE' ? 'Open Finance' : parcela.formaPagamento}
+                                              </span>
+                                            )}
+                                          </p>
+                                        </div>
+                                        <div className="text-right">
+                                          <p className="font-semibold">{formatCurrency(parcela.valor)}</p>
+                                          {parcela.valorDivergente && parcela.valorDivergente > 0 && (
+                                            <p className="text-xs text-red-600 dark:text-red-400 font-medium mt-1">
+                                              Inadimplente: {formatCurrency(parcela.valorDivergente)}
+                                            </p>
+                                          )}
+                                          <div className="mt-1">
+                                            {parcelasProcessando.has(parcela.cdParcela || 0) ? (
+                                              <Badge variant="secondary" className="flex items-center gap-1 w-fit ml-auto">
+                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                                Processando...
+                                              </Badge>
+                                            ) : parcelasProcessadas.has(parcela.cdParcela || 0) ? (
+                                              <Badge variant="default" className="bg-success text-success-foreground flex items-center gap-1 w-fit ml-auto">
+                                                <CheckCircle className="h-3 w-3" />
+                                                Liquidado
+                                              </Badge>
+                                            ) : (
+                                              getParcelaStatusBadge(parcela)
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+                                      {/* Mini indicador de inadimplência no card expandido */}
+                                      {parcela.valorDivergente && parcela.valorDivergente > 0 && (
+                                        <div className="mb-2 p-2 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded text-xs">
+                                          <div className="flex items-center gap-2">
+                                            <AlertTriangle className="h-3 w-3 text-red-600 dark:text-red-400" />
+                                            <span className="text-red-700 dark:text-red-300">
+                                              Inadimplência: {formatCurrency(parcela.valorDivergente)} ({((parcela.valorDivergente / parcela.valor) * 100).toFixed(1)}%)
+                                            </span>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {parcela.comprovante || parcela.linkDocumento ? (
+                                        <div className="mt-2 flex gap-2">
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="flex-1 text-xs"
+                                            onClick={() => handlePreviewComprovante(parcela.comprovante || parcela.linkDocumento, parcela.cdParcela)}
+                                          >
+                                            <Eye className="h-3 w-3 mr-1" />
+                                            Ver
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="flex-1 text-xs"
+                                            onClick={() => handleDownloadComprovante(parcela.comprovante || parcela.linkDocumento, parcela.numParcela, parcela.cdParcela)}
+                                          >
+                                            <Download className="h-3 w-3 mr-1" />
+                                            Download
+                                          </Button>
+                                        </div>
+                                      ) : (
+                                        <p className="text-xs text-muted-foreground mt-2">Sem comprovante</p>
+                                      )}
+                                    </Card>
+                                  ))}
+                                </div>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </React.Fragment>
                     );
                   })}
                 </TableBody>
@@ -931,15 +1883,94 @@ const AvisoDebito = () => {
                           <CardTitle className="text-base">Parcela {parcela.numParcela}</CardTitle>
                           <CardDescription>
                             Vencimento: {new Date(parcela.data).toLocaleDateString('pt-BR')}
+                            {parcela.formaPagamento && (
+                              <span className="ml-2">
+                                • {parcela.formaPagamento === 'OPEN_FINANCE' ? 'Open Finance' : parcela.formaPagamento}
+                              </span>
+                            )}
                           </CardDescription>
                         </div>
                         <div className="text-right">
                           <div className="text-lg font-bold">{formatCurrency(parcela.valor)}</div>
                           <div className="mt-2">{getParcelaStatusBadge(parcela)}</div>
+                          {parcela.formaPagamento && parcela.formaPagamento === 'OPEN_FINANCE' && (
+                            <Badge variant="outline" className="mt-1 text-xs">
+                              <CreditCard className="h-3 w-3 mr-1" />
+                              Open Finance
+                            </Badge>
+                          )}
                         </div>
                       </div>
                     </CardHeader>
-                    <CardContent>
+                    <CardContent className="space-y-4">
+                      {/* Alerta de Inadimplência */}
+                      {parcela.valorDivergente && parcela.valorDivergente > 0 && (
+                        <div className="p-4 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-lg">
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0" />
+                                <h4 className="font-semibold text-red-900 dark:text-red-100">Inadimplência Detectada</h4>
+                              </div>
+                              <Badge variant="destructive" className="text-sm whitespace-nowrap">
+                                {formatCurrency(parcela.valorDivergente)}
+                              </Badge>
+                            </div>
+                            
+                            <p className="text-sm text-red-700 dark:text-red-300">
+                              Esta parcela foi paga com valor inferior ao esperado. Há uma diferença de{' '}
+                              <strong>{((parcela.valorDivergente / parcela.valor) * 100).toFixed(2)}%</strong> em relação ao valor original.
+                            </p>
+                            
+                            {/* Mini gráfico de inadimplência */}
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-center">
+                                <div className="h-24 w-24">
+                                  <ResponsiveContainer width="100%" height="100%">
+                                    <PieChart>
+                                      <Pie
+                                        data={[
+                                          { name: 'Valor Pago', value: parcela.valor - parcela.valorDivergente, color: '#10B981' },
+                                          { name: 'Inadimplência', value: parcela.valorDivergente, color: '#EF4444' }
+                                        ]}
+                                        cx="50%"
+                                        cy="50%"
+                                        innerRadius={22}
+                                        outerRadius={40}
+                                        paddingAngle={2}
+                                        dataKey="value"
+                                      >
+                                        {[
+                                          { name: 'Valor Pago', value: parcela.valor - parcela.valorDivergente, color: '#10B981' },
+                                          { name: 'Inadimplência', value: parcela.valorDivergente, color: '#EF4444' }
+                                        ].map((entry, index) => (
+                                          <Cell key={`cell-${index}`} fill={entry.color} />
+                                        ))}
+                                      </Pie>
+                                    </PieChart>
+                                  </ResponsiveContainer>
+                                </div>
+                              </div>
+                              
+                              <div className="flex items-center justify-center gap-6 text-xs">
+                                <div className="flex items-center gap-1.5">
+                                  <div className="w-3 h-3 rounded-full bg-green-500 flex-shrink-0"></div>
+                                  <span className="text-muted-foreground whitespace-nowrap">
+                                    Pago: {formatCurrency(parcela.valor - parcela.valorDivergente)}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <div className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0"></div>
+                                  <span className="text-muted-foreground whitespace-nowrap">
+                                    Inadimplente: {formatCurrency(parcela.valorDivergente)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      
                       <div className="space-y-2">
                         <Label className="text-sm font-medium">Comprovante de Pagamento</Label>
                         
@@ -965,17 +1996,6 @@ const AvisoDebito = () => {
                                 </div>
                                 {parcela.comprovante && (
                                   <p className="text-xs text-muted-foreground">{(parcela.comprovante.size / 1024).toFixed(2)} KB</p>
-                                )}
-                                {parcela.linkDocumento && (
-                                  <a 
-                                    href={parcela.linkDocumento} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="text-xs text-primary hover:underline flex items-center gap-1 mt-1"
-                                  >
-                                    <FileText className="h-3 w-3" />
-                                    Ver documento no storage
-                                  </a>
                                 )}
                                 {parcela.dadosExtraidos && (
                                   <div className="flex items-center gap-2 mt-1">
@@ -1013,10 +2033,10 @@ const AvisoDebito = () => {
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => window.open(parcela.linkDocumento, '_blank')}
+                                  onClick={() => handlePreviewComprovante(parcela.linkDocumento, parcela.cdParcela)}
                                 >
                                   <FileText className="h-4 w-4 mr-2" />
-                                  Abrir no Storage
+                                  Abrir comprovante
                                 </Button>
                               )}
                               {parcela.comprovante && (
@@ -1024,7 +2044,7 @@ const AvisoDebito = () => {
                                   <Button
                                     size="sm"
                                     variant="outline"
-                                    onClick={() => handlePreviewComprovante(parcela.comprovante!)}
+                                    onClick={() => handlePreviewComprovante(parcela.comprovante || parcela.linkDocumento, parcela.cdParcela)}
                                   >
                                     <Eye className="h-4 w-4 mr-2" />
                                     Visualizar
@@ -1032,22 +2052,13 @@ const AvisoDebito = () => {
                                   <Button
                                     size="sm"
                                     variant="outline"
-                                    onClick={() => handleDownloadComprovante(parcela.comprovante!, parcela.numParcela)}
+                                    onClick={() => handleDownloadComprovante(parcela.comprovante || parcela.linkDocumento, parcela.numParcela, parcela.cdParcela)}
                                   >
                                     <Download className="h-4 w-4 mr-2" />
                                     Download
                                   </Button>
                                 </>
                               )}
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleRemoverComprovante(parcela.numParcela)}
-                                className="text-destructive hover:text-destructive"
-                              >
-                                <X className="h-4 w-4 mr-2" />
-                                Remover
-                              </Button>
                             </div>
                           </div>
                         ) : null}
@@ -1324,6 +2335,278 @@ const AvisoDebito = () => {
               setDadosExtraidosModal(null);
             }}>
               Confirmar e Enviar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog para processar arquivo CNAB */}
+      <Dialog open={isCNABDialogOpen} onOpenChange={setIsCNABDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Processar Arquivo CNAB</DialogTitle>
+            <DialogDescription>
+              Faça upload do arquivo CNAB retornado pelo banco para processar os pagamentos em lote
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="cnab-file">Arquivo CNAB (.txt)</Label>
+              <Input
+                id="cnab-file"
+                type="file"
+                accept=".txt"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    setCnabFile(file);
+                    setProgressoProcessamento(null);
+                  }
+                }}
+                disabled={isProcessingCNAB}
+              />
+              {cnabFile && (
+                <p className="text-sm text-muted-foreground mt-2">
+                  Arquivo selecionado: {cnabFile.name}
+                </p>
+              )}
+            </div>
+
+            {/* Seção de Progresso */}
+            {progressoProcessamento && (
+              <div className="space-y-4 border-t pt-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <Label className="text-base font-semibold">Progresso do Processamento</Label>
+                    <span className="text-sm text-muted-foreground">
+                      {progressoProcessamento.processadas} / {progressoProcessamento.total}
+                    </span>
+                  </div>
+                  <Progress 
+                    value={(progressoProcessamento.processadas / progressoProcessamento.total) * 100} 
+                    className="h-2"
+                  />
+                </div>
+
+                {/* Lista de Faturas e Parcelas */}
+                <div className="max-h-64 overflow-y-auto space-y-2">
+                  {progressoProcessamento.itens.map((item, index) => (
+                    <div
+                      key={`${item.cdParcela}-${index}`}
+                      className={cn(
+                        "flex items-center justify-between p-3 rounded-lg border",
+                        item.status === 'processada' && "bg-green-50 border-green-200",
+                        item.status === 'processando' && "bg-blue-50 border-blue-200",
+                        item.status === 'erro' && "bg-red-50 border-red-200"
+                      )}
+                    >
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        {item.status === 'processando' && (
+                          <Loader2 className="h-4 w-4 animate-spin text-blue-600 flex-shrink-0" />
+                        )}
+                        {item.status === 'processada' && (
+                          <CheckCircle className="h-4 w-4 text-green-600 flex-shrink-0" />
+                        )}
+                        {item.status === 'erro' && (
+                          <X className="h-4 w-4 text-red-600 flex-shrink-0" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{item.fatura}</p>
+                          <p className="text-xs text-muted-foreground">
+                            Parcela #{item.parcela}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex-shrink-0">
+                        {item.status === 'processando' && (
+                          <Badge variant="secondary" className="bg-blue-100 text-blue-700">
+                            Processando...
+                          </Badge>
+                        )}
+                        {item.status === 'processada' && (
+                          <Badge variant="secondary" className="bg-green-100 text-green-700">
+                            Processada
+                          </Badge>
+                        )}
+                        {item.status === 'erro' && (
+                          <Badge variant="destructive">
+                            Erro
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsCNABDialogOpen(false);
+                setCnabFile(null);
+                setProgressoProcessamento(null);
+              }}
+              disabled={isProcessingCNAB}
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleProcessarCNAB}
+              disabled={!cnabFile || isProcessingCNAB}
+            >
+              {isProcessingCNAB ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Processando...
+                </>
+              ) : (
+                <>
+                  <FileCheck className="h-4 w-4 mr-2" />
+                  Processar
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog para pagamento via Open Finance */}
+      <Dialog open={isOpenFinanceDialogOpen} onOpenChange={setIsOpenFinanceDialogOpen}>
+        <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Pagar Parcelas via Open Finance</DialogTitle>
+            <DialogDescription>
+              Selecione as parcelas que deseja pagar via Open Finance. O pagamento será processado automaticamente.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="max-h-96 overflow-y-auto border rounded-lg p-4">
+              <div className="space-y-2">
+                {filteredUsuarias.map((usuaria) => (
+                  <div key={usuaria.id} className="space-y-2">
+                    <div className="font-semibold text-sm">{usuaria.usuaria}</div>
+                    {usuaria.parcelas
+                      .filter(p => p.cdParcela && !p.comprovante && !p.linkDocumento)
+                      .map((parcela) => {
+                        const isSelected = selectedParcelasForOpenFinance.has(parcela.cdParcela!);
+                        const pagamento = pagamentosOpenFinance.get(parcela.cdParcela!);
+                        return (
+                          <div
+                            key={parcela.numParcela}
+                            className={`flex items-center justify-between p-2 border rounded cursor-pointer hover:bg-muted/50 ${
+                              isSelected ? 'bg-primary/10 border-primary' : ''
+                            }`}
+                            onClick={() => {
+                              if (pagamento?.status === 'PENDENTE_BANCO' || pagamento?.status === 'CONFIRMADO') return;
+                              setSelectedParcelasForOpenFinance(prev => {
+                                const newSet = new Set(prev);
+                                if (isSelected) {
+                                  newSet.delete(parcela.cdParcela!);
+                                } else {
+                                  newSet.add(parcela.cdParcela!);
+                                }
+                                return newSet;
+                              });
+                            }}
+                          >
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {}}
+                                disabled={pagamento?.status === 'PENDENTE_BANCO' || pagamento?.status === 'CONFIRMADO'}
+                                className="cursor-pointer"
+                              />
+                              <span className="text-sm">
+                                Parcela {parcela.numParcela} - {formatCurrency(parcela.valor)} - Venc: {new Date(parcela.data).toLocaleDateString('pt-BR')}
+                              </span>
+                            </div>
+                            <div>
+                              {pagamento?.status === 'PENDENTE_BANCO' && (
+                                <Badge variant="secondary" className="bg-blue-100 text-blue-700">
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  Processando...
+                                </Badge>
+                              )}
+                              {pagamento?.status === 'CONFIRMADO' && (
+                                <Badge variant="default" className="bg-success text-success-foreground">
+                                  <CheckCircle className="h-3 w-3 mr-1" />
+                                  Confirmado
+                                </Badge>
+                              )}
+                              {pagamento?.status === 'FALHOU' && (
+                                <Badge variant="destructive">
+                                  Falhou
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                ))}
+                {filteredUsuarias.every(u => u.parcelas.every(p => !p.cdParcela || p.comprovante || p.linkDocumento)) && (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    Nenhuma parcela disponível para pagamento via Open Finance
+                  </p>
+                )}
+              </div>
+            </div>
+            {selectedParcelasForOpenFinance.size > 0 && (
+              <div className="text-sm text-muted-foreground">
+                {selectedParcelasForOpenFinance.size} parcela(s) selecionada(s)
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsOpenFinanceDialogOpen(false);
+                setSelectedParcelasForOpenFinance(new Set());
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={async () => {
+                if (selectedParcelasForOpenFinance.size === 0) {
+                  toast({
+                    title: 'Nenhuma parcela selecionada',
+                    description: 'Por favor, selecione pelo menos uma parcela para pagar',
+                    variant: 'destructive'
+                  });
+                  return;
+                }
+
+                // Processar cada parcela selecionada
+                for (const cdParcela of selectedParcelasForOpenFinance) {
+                  const usuaria = filteredUsuarias.find(u => 
+                    u.parcelas.some(p => p.cdParcela === cdParcela)
+                  );
+                  const parcela = usuaria?.parcelas.find(p => p.cdParcela === cdParcela);
+                  if (parcela) {
+                    await handlePagarViaOpenFinance(cdParcela, parcela.valor);
+                    // Pequeno delay entre pagamentos
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                  }
+                }
+
+                toast({
+                  title: 'Pagamentos iniciados',
+                  description: `${selectedParcelasForOpenFinance.size} pagamento(s) iniciado(s) via Open Finance`
+                });
+
+                setSelectedParcelasForOpenFinance(new Set());
+                setIsOpenFinanceDialogOpen(false);
+              }}
+              disabled={selectedParcelasForOpenFinance.size === 0}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              <CreditCard className="h-4 w-4 mr-2" />
+              Pagar {selectedParcelasForOpenFinance.size} Parcela(s)
             </Button>
           </DialogFooter>
         </DialogContent>

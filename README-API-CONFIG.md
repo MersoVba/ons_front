@@ -20,10 +20,10 @@ Crie um arquivo `.env` na raiz do projeto `ons_front`:
 
 ```env
 # Para desenvolvimento local
-VITE_API_BASE_URL=http://localhost:8088/ons-api/api/v1
+VITE_API_BASE_URL=http://localhost:8088/ons-api/
 
 # Para produção (ou use .env.production)
-VITE_API_BASE_URL=https://projeto-ons-backendons-f5u22n-2dd318-147-93-32-227.traefik.me/ons-api/api/v1
+VITE_API_BASE_URL=https://projeto-ons-backendons-f5u22n-2dd318-147-93-32-227.traefik.me/ons-api/
 ```
 
 ### Opção 2: Arquivos de Ambiente por Ambiente

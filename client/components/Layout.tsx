@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
+import { API_BASE_URL } from '@/lib/api-config';
 import {
   LayoutDashboard,
   FileText,
@@ -30,6 +31,16 @@ interface LayoutProps {
   children?: React.ReactNode;
 }
 
+interface Notificacao {
+  id: number;
+  empresa: string;
+  comprovante: string;
+  valor: number | null;
+  status: string;
+  dataCriacao: string;
+  dataEnvio: string;
+}
+
 const navigationCommon = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
 ];
@@ -40,6 +51,7 @@ const navigationAVC = [
 
 const navigationAVD = [
   { name: 'Aviso de Débito', href: '/aviso-debito', icon: AlertTriangle },
+  { name: 'Rateio', href: '/rateio', icon: Percent },
 ];
 
 export default function Layout({ children }: LayoutProps) {
@@ -52,6 +64,10 @@ export default function Layout({ children }: LayoutProps) {
   });
 
   const accessType = currentUser?.accessType || '';
+  const isADC = accessType === 'AVC' || accessType === 'ADC';
+
+  const [notificacoes, setNotificacoes] = useState<Notificacao[]>([]);
+  const [loadingNotificacoes, setLoadingNotificacoes] = useState(false);
 
   const handleLogout = () => {
     try {
@@ -61,32 +77,108 @@ export default function Layout({ children }: LayoutProps) {
     navigate('/login');
   };
 
-  // Mock notifications - em produção viria de uma API/Context
-  const notificacoesRecentes = [
-    {
-      id: '1',
-      titulo: 'Vencimento em 3 dias - NFe 000001234',
-      tipo: 'vencimento',
-      tempo: '2 horas atrás',
-      lida: false
-    },
-    {
-      id: '2',
-      titulo: 'Atualização Cadastral Aprovada',
-      tipo: 'cadastral',
-      tempo: '1 dia atrás',
-      lida: false
-    },
-    {
-      id: '3',
-      titulo: 'Novo Documento de Cobrança',
-      tipo: 'documento',
-      tempo: '2 dias atrás',
-      lida: true
-    }
-  ];
+  // Polling contínuo de notificações (a cada 30 segundos)
+  useEffect(() => {
+    if (!isADC) return;
 
-  const notificacoesNaoLidas = notificacoesRecentes.filter(n => !n.lida).length;
+    // Função para buscar notificações pendentes
+    const buscarNotificacoes = async () => {
+      try {
+        setLoadingNotificacoes(true);
+        const token = localStorage.getItem('authToken');
+        if (!token) return;
+
+        const cleanToken = token.trim().replace(/[\r\n]/g, '');
+        const response = await fetch(`${API_BASE_URL}/notificacoes`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${cleanToken}`,
+          },
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log('🔔 Resposta da API de notificações:', data);
+          
+          // A API pode retornar um array, um objeto único, ou um objeto com array
+          let notificacoesArray: Notificacao[] = [];
+          
+          if (Array.isArray(data)) {
+            notificacoesArray = data;
+          } else if (data.id !== undefined) {
+            // Se for um objeto único (como o exemplo fornecido)
+            notificacoesArray = [data];
+          } else if (data.data && Array.isArray(data.data)) {
+            notificacoesArray = data.data;
+          } else if (data.notificacoes && Array.isArray(data.notificacoes)) {
+            notificacoesArray = data.notificacoes;
+          }
+          
+          console.log('🔔 Notificações processadas:', notificacoesArray.length);
+          setNotificacoes(notificacoesArray);
+        } else {
+          console.error('❌ Erro ao buscar notificações:', response.status, response.statusText);
+          const errorText = await response.text();
+          console.error('❌ Detalhes do erro:', errorText);
+        }
+      } catch (error) {
+        console.error('Erro ao buscar notificações:', error);
+      } finally {
+        setLoadingNotificacoes(false);
+      }
+    };
+
+    // Buscar imediatamente ao montar
+    buscarNotificacoes();
+
+    // Configurar polling a cada 1 minuto
+    const interval = setInterval(() => {
+      buscarNotificacoes();
+    }, 60000); // 60 segundos (1 minuto)
+
+    // Limpar intervalo ao desmontar
+    return () => clearInterval(interval);
+  }, [isADC]);
+
+  // Formatar notificações para exibição
+  const formatarNotificacao = (notif: Notificacao) => {
+    const dataCriacao = new Date(notif.dataCriacao);
+    const agora = new Date();
+    const diffMs = agora.getTime() - dataCriacao.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    let tempo = '';
+    if (diffMins < 60) {
+      tempo = `${diffMins} minuto${diffMins !== 1 ? 's' : ''} atrás`;
+    } else if (diffHours < 24) {
+      tempo = `${diffHours} hora${diffHours !== 1 ? 's' : ''} atrás`;
+    } else {
+      tempo = `${diffDays} dia${diffDays !== 1 ? 's' : ''} atrás`;
+    }
+
+    return {
+      id: notif.id.toString(),
+      titulo: `${notif.empresa} - Comprovante ${notif.comprovante}`,
+      tipo: 'comprovante',
+      tempo: tempo,
+      lida: false,
+      valor: notif.valor,
+      status: notif.status
+    };
+  };
+
+  const notificacoesFormatadas = notificacoes.map(formatarNotificacao);
+  const notificacoesNaoLidas = notificacoesFormatadas.length;
+  
+  // Debug: log do contador de notificações
+  useEffect(() => {
+    if (isADC) {
+      console.log('🔔 Contador de notificações atualizado:', notificacoesNaoLidas);
+    }
+  }, [notificacoesNaoLidas, isADC]);
 
   let filteredNavigation = navigationCommon;
   if (accessType === 'AVD') {
@@ -117,14 +209,14 @@ export default function Layout({ children }: LayoutProps) {
                   </div>
                 </TooltipTrigger>
                 <TooltipContent side="right">
-                  <p>{accessType === 'AVD' ? 'ONS - AVD' : 'ONS'}</p>
+                  <p>{accessType === 'AVD' ? 'ONS' : 'ONS'}</p>
                 </TooltipContent>
               </Tooltip>
             ) : (
               <div className="flex items-center">
                 <Building2 className="h-8 w-8 text-sidebar-primary" />
                 <span className="ml-2 text-lg font-bold text-sidebar-foreground whitespace-nowrap">
-                  {accessType === 'AVD' ? 'ONS - AVD' : 'ONS'}
+                  {accessType === 'AVD' ? 'ONS' : 'ONS'}
                 </span>
               </div>
             )}
@@ -144,7 +236,7 @@ export default function Layout({ children }: LayoutProps) {
                 )}
               </Button>
 
-              {!sidebarCollapsed && (
+              {!sidebarCollapsed && isADC && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="sm" className="relative">
@@ -160,27 +252,42 @@ export default function Layout({ children }: LayoutProps) {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-80">
-                    <DropdownMenuLabel>Notificações Recentes</DropdownMenuLabel>
+                    <DropdownMenuLabel>
+                      Notificações Pendentes
+                      {loadingNotificacoes && <span className="ml-2 text-xs text-muted-foreground">Carregando...</span>}
+                    </DropdownMenuLabel>
                     <DropdownMenuSeparator />
-                    {notificacoesRecentes.slice(0, 3).map((notif) => (
-                      <DropdownMenuItem key={notif.id} className="flex-col items-start p-3">
-                        <div className="flex items-center justify-between w-full">
-                          <span className={`text-sm ${!notif.lida ? 'font-medium' : 'text-muted-foreground'}`}>
-                            {notif.titulo}
-                          </span>
-                          {!notif.lida && (
-                            <div className="h-2 w-2 bg-primary rounded-full ml-2" />
-                          )}
-                        </div>
-                        <span className="text-xs text-muted-foreground">{notif.tempo}</span>
+                    {notificacoesFormatadas.length === 0 ? (
+                      <DropdownMenuItem disabled className="text-center text-sm text-muted-foreground py-4">
+                        Nenhuma notificação pendente
                       </DropdownMenuItem>
-                    ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem asChild>
-                      <Link to="/comunicacao" className="w-full text-center text-sm text-primary">
-                        Ver todas as notificações
-                      </Link>
-                    </DropdownMenuItem>
+                    ) : (
+                      <>
+                        {notificacoesFormatadas.slice(0, 5).map((notif) => (
+                          <DropdownMenuItem key={notif.id} className="flex-col items-start p-3">
+                            <div className="flex items-center justify-between w-full">
+                              <span className="text-sm font-medium">
+                                {notif.titulo}
+                              </span>
+                              <div className="h-2 w-2 bg-primary rounded-full ml-2" />
+                            </div>
+                            <div className="flex items-center justify-between w-full mt-1">
+                              <span className="text-xs text-muted-foreground">{notif.tempo}</span>
+                              {notif.valor && (
+                                <span className="text-xs font-semibold text-primary">
+                                  R$ {notif.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              )}
+                            </div>
+                          </DropdownMenuItem>
+                        ))}
+                        {notificacoesFormatadas.length > 5 && (
+                          <DropdownMenuItem disabled className="text-center text-xs text-muted-foreground py-2">
+                            +{notificacoesFormatadas.length - 5} mais notificações
+                          </DropdownMenuItem>
+                        )}
+                      </>
+                    )}
                   </DropdownMenuContent>
                 </DropdownMenu>
               )}

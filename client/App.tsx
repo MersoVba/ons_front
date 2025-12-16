@@ -14,6 +14,7 @@ import RequireAuth from "./components/RequireAuth";
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const AvisoDebito = lazy(() => import("./pages/AvisoDebito"));
 const AvisoCredito = lazy(() => import("./pages/AvisoCredito"));
+const Rateio = lazy(() => import("./pages/Rateio"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 const Login = lazy(() => import("./pages/Login"));
 const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
@@ -91,6 +92,7 @@ const App = () => (
               <Route path="/" element={<Dashboard />} />
               <Route path="/aviso-debito" element={<AvisoDebito />} />
               <Route path="/aviso-credito" element={<AvisoCredito />} />
+              <Route path="/rateio" element={<Rateio />} />
               <Route path="/profile" element={<Profile />} />
               <Route path="/forbidden" element={<Forbidden />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}

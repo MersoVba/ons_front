@@ -7,21 +7,21 @@
  * VITE_API_BASE_URL=http://localhost:8088/ons-api/api/v1
  * 
  * Para produção (Vercel):
- * - Se não configurado, usa a API local do Vercel (/api/v1)
- * - Ou configure: VITE_API_BASE_URL=https://sua-api-externa.com/api/v1
+ * - Usa a API externa diretamente (sem proxy Express)
+ * - Configure: VITE_API_BASE_URL=https://projeto-ons-backendons-f5u22n-2dd318-147-93-32-227.traefik.me/ons-api/api/v1
  */
 
 // Determina a URL base da API
-// Em produção no Vercel, SEMPRE usa a API local para evitar problemas de certificado SSL
+// Em produção, chama a API externa diretamente (sem proxy)
 const getApiBaseUrl = () => {
-  // Em produção (Vercel), SEMPRE usa a API local (o backend faz proxy se necessário)
-  if (import.meta.env.PROD) {
-    return "/api/v1";
-  }
-  
-  // Em desenvolvimento, verifica se há variável de ambiente
+  // Sempre verifica variável de ambiente primeiro (tanto dev quanto prod)
   if (import.meta.env.VITE_API_BASE_URL) {
     return import.meta.env.VITE_API_BASE_URL;
+  }
+  
+  // Em produção, usa a API externa padrão
+  if (import.meta.env.PROD) {
+    return "https://projeto-ons-backendons-f5u22n-2dd318-147-93-32-227.traefik.me/ons-api/";
   }
   
   // Em desenvolvimento local, usa localhost
